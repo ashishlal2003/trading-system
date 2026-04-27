@@ -1,0 +1,18 @@
+intraday:
+  - SBIN
+  - WIPRO
+  - IDEA
+  - IRFC
+  - NHPC
+  - RECLTD
+  - NMDC
+  - SAIL
+  - IDFCFIRSTB
+  - SUZLON
+
+swing:
+  - SBIN
+  - WIPRO
+  - IRFC
+  - NHPC
+  - SUZLON

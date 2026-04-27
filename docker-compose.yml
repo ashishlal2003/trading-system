@@ -1,0 +1,25 @@
+services:
+  trading-bot:
+    build: .
+    container_name: algo-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./db:/app/db
+      - ./logs:/app/logs
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Kolkata
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import aiosqlite, openai, telegram; print('ok')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
