@@ -276,6 +276,21 @@ class TradingScheduler:
         if hasattr(self, 'context_builder') and self.context_builder:
             self.context_builder.news_cache = self._cached_news
 
+        # --- Verify Groww API is reachable ---
+        try:
+            await self.data_pipeline._market_data.get_portfolio()
+            logger.info("scheduler.pre_market_scan.groww_api_ok")
+        except Exception as exc:
+            logger.error("scheduler.pre_market_scan.groww_api_error", error=str(exc))
+            try:
+                await self.telegram_bot.send_message(
+                    f"🚨 *Groww API unreachable at pre-market check!*\n"
+                    f"`{type(exc).__name__}: {str(exc)[:200]}`\n\n"
+                    f"Your API key may have expired. Renew it on the EC2 before 9:15 IST or no signals will be generated today."
+                )
+            except Exception:
+                pass
+
         # --- Pre-market Telegram summary ---
         try:
             overview = self.news_summarizer.summarize_market_overview(
@@ -350,15 +365,42 @@ class TradingScheduler:
                 error=str(exc),
                 exc_info=True,
             )
+            try:
+                await self.telegram_bot.send_message(
+                    f"⚠️ *Intraday scan failed* — pipeline error\n`{type(exc).__name__}: {exc}`"
+                )
+            except Exception:
+                pass
+            return
+
+        # Alert if ALL symbols failed (likely expired Groww token)
+        failed_results = [r for r in scan_results if r.error]
+        if failed_results and len(failed_results) == len(scan_results):
+            sample_error = failed_results[0].error or "unknown"
+            try:
+                await self.telegram_bot.send_message(
+                    f"⚠️ *All symbols failed to scan* — Groww API error?\n"
+                    f"Sample: `{sample_error[:200]}`\n"
+                    f"Check if your Groww API key has expired and needs renewal."
+                )
+            except Exception:
+                pass
             return
 
         # --- Generate signals and forward actionable ones ---
         for result in scan_results:
             if result.indicators is None:
-                logger.debug(
-                    "scheduler.intraday_scan.no_indicators",
-                    symbol=result.symbol,
-                )
+                if result.error:
+                    logger.warning(
+                        "scheduler.intraday_scan.symbol_error",
+                        symbol=result.symbol,
+                        error=result.error,
+                    )
+                else:
+                    logger.debug(
+                        "scheduler.intraday_scan.no_indicators",
+                        symbol=result.symbol,
+                    )
                 continue
 
             try:
