@@ -26,6 +26,10 @@ class Settings(BaseSettings):
         default="https://api.groww.in/v1",
         description="Groww REST API base URL",
     )
+    GROWW_TOTP_SECRET: str = Field(
+        default="",
+        description="Groww TOTP secret (32-char string from API dashboard). When set, the bot auto-refreshes its access token daily at 06:05 IST.",
+    )
 
     # ------------------------------------------------------------------ #
     # OpenAI / LLM

@@ -172,7 +172,18 @@ async def main() -> None:
         api_key=settings.GROWW_API_KEY,
         api_secret=settings.GROWW_API_SECRET,
         base_url=settings.GROWW_BASE_URL,
+        totp_secret=settings.GROWW_TOTP_SECRET,
     ) as groww:
+
+        # If TOTP is configured, refresh the access token immediately at startup
+        # so we never start with a stale/expired token.
+        if settings.GROWW_TOTP_SECRET:
+            try:
+                await groww.refresh_access_token()
+                logger.info("main.groww_token_refreshed_at_startup")
+            except Exception as exc:
+                logger.error("main.groww_token_refresh_failed", error=str(exc))
+                # Non-fatal — continue with whatever token is in .env
 
         # --- Broker layer ---------------------------------------------------
         market_data = MarketDataService(client=groww)
@@ -481,6 +492,7 @@ async def main() -> None:
             watchlist=watchlist,
             settings=settings,
             context_builder=context_builder,
+            groww_client=groww,
         )
 
         # -----------------------------------------------------------------------
