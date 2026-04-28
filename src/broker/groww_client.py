@@ -5,8 +5,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Groww auth endpoint — outside the versioned base URL
-_AUTH_URL = "https://api.groww.in/v1/auth/access-token"
+# Groww auth endpoint for TOTP-based token exchange
+_AUTH_URL = "https://api.groww.in/v1/token/api/access"
 
 
 class GrowwAPIError(Exception):
@@ -85,10 +85,11 @@ class GrowwClient:
             response = await auth_client.post(
                 _AUTH_URL,
                 json={
-                    "api_key": self.api_key,   # Groww API key (not the access token)
+                    "key_type": "totp",
                     "totp": current_code,
                 },
                 headers={
+                    "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
@@ -102,10 +103,11 @@ class GrowwClient:
             raise GrowwAPIError(response.status_code, msg)
 
         data = response.json()
-        # Groww returns the token under "access_token" or "data.access_token"
+        # Groww returns token under payload.token
         token = (
-            data.get("access_token")
-            or (data.get("data") or {}).get("access_token")
+            (data.get("payload") or {}).get("token")
+            or data.get("token")
+            or data.get("access_token")
             or ""
         )
         if not token:
