@@ -215,6 +215,7 @@ async def main() -> None:
             max_daily_loss_pct=settings.MAX_DAILY_LOSS_PCT,
             max_open_positions=settings.MAX_OPEN_POSITIONS,
             trade_store=trade_store,
+            intraday_leverage=settings.INTRADAY_LEVERAGE,
         )
         sl_enforcer = StopLossEnforcer(
             order_manager=order_manager,
@@ -301,6 +302,7 @@ async def main() -> None:
                 pos_size = risk_manager.compute_position_size(
                     entry_price=entry_price,
                     stop_loss=stop_loss,
+                    trade_type=signal.trade_type,
                 )
                 final_qty = pos_size.quantity
             except ValueError:

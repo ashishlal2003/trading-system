@@ -73,6 +73,10 @@ class Settings(BaseSettings):
         default=5,
         description="Maximum number of concurrent open positions",
     )
+    INTRADAY_LEVERAGE: float = Field(
+        default=5.0,
+        description="Intraday MIS leverage multiplier (5x on Groww for most stocks)",
+    )
     INTRADAY_SL_PCT: float = Field(
         default=0.5,
         description="Default intraday stop-loss as a percentage of entry price",

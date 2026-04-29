@@ -9,6 +9,9 @@ intraday:
   - SAIL
   - IDFCFIRSTB
   - SUZLON
+  - RELIANCE
+  - TCS
+  - INFY
 
 swing:
   - SBIN
@@ -16,3 +19,6 @@ swing:
   - IRFC
   - NHPC
   - SUZLON
+  - RELIANCE
+  - TCS
+  - INFY

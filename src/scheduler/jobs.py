@@ -509,6 +509,7 @@ class TradingScheduler:
                 pos_size = self.risk_manager.compute_position_size(
                     entry_price=signal.entry_price,
                     stop_loss=signal.stop_loss,
+                    trade_type=signal.trade_type,
                 )
 
                 await self.telegram_bot.send_signal(signal, pos_size.quantity)

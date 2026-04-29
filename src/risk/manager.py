@@ -28,12 +28,14 @@ class RiskManager:
         max_daily_loss_pct: float,
         max_open_positions: int,
         trade_store,  # TradeStore instance
+        intraday_leverage: float = 5.0,
     ):
         self.total_capital = total_capital
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.max_daily_loss_pct = max_daily_loss_pct
         self.max_open_positions = max_open_positions
         self.trade_store = trade_store
+        self.intraday_leverage = intraday_leverage
 
         # Absolute capital amount at which daily trading halts.
         self.max_daily_loss_limit = -(total_capital * (max_daily_loss_pct / 100))
@@ -43,11 +45,20 @@ class RiskManager:
     # ------------------------------------------------------------------
 
     def compute_position_size(
-        self, entry_price: float, stop_loss: float
+        self, entry_price: float, stop_loss: float, trade_type: str = "INTRADAY"
     ) -> PositionSize:
         """
-        Calculate the number of shares to trade so that, if stopped out,
-        the loss equals exactly (max_risk_per_trade_pct / 100) of total capital.
+        Calculate the number of shares to trade bounded by two constraints:
+
+        1. Risk constraint  — if stopped out, loss <= max_risk_per_trade_pct% of capital
+           qty_risk = floor(capital * risk_pct / risk_per_share)
+
+        2. Capital constraint — can't deploy more than an equal share of buying power
+           buying_power     = capital * leverage   (intraday) | capital (swing)
+           max_per_trade    = buying_power / max_open_positions
+           qty_capital      = floor(max_per_trade / entry_price)
+
+        Final quantity = min(qty_risk, qty_capital)
 
         Raises:
             ValueError: if entry_price == stop_loss (zero risk per share).
@@ -59,24 +70,35 @@ class RiskManager:
                 "cannot compute position size with zero risk per share."
             )
 
+        # --- Constraint 1: risk-based quantity ---
         risk_amount = self.total_capital * (self.max_risk_per_trade_pct / 100)
-        raw_quantity = risk_amount / risk_per_share
-        quantity = max(1, math.floor(raw_quantity))
+        qty_risk = max(1, math.floor(risk_amount / risk_per_share))
+
+        # --- Constraint 2: capital-based quantity ---
+        leverage = self.intraday_leverage if trade_type.upper() == "INTRADAY" else 1.0
+        max_capital_per_trade = (self.total_capital * leverage) / self.max_open_positions
+        qty_capital = max(1, math.floor(max_capital_per_trade / entry_price))
+
+        quantity = min(qty_risk, qty_capital)
 
         capital_at_risk = quantity * risk_per_share
         risk_pct = (capital_at_risk / self.total_capital) * 100
-        max_loss = capital_at_risk  # identical by construction; exposed on the dataclass
+        capital_deployed = quantity * entry_price
 
         logger.info(
             "position_sizing",
+            trade_type=trade_type,
             entry_price=entry_price,
             stop_loss=stop_loss,
             risk_per_share=risk_per_share,
             risk_amount=risk_amount,
-            raw_quantity=round(raw_quantity, 4),
+            qty_risk=qty_risk,
+            qty_capital=qty_capital,
             quantity=quantity,
+            capital_deployed=round(capital_deployed, 2),
             capital_at_risk=round(capital_at_risk, 2),
             risk_pct=round(risk_pct, 4),
+            leverage=leverage,
         )
 
         return PositionSize(
@@ -85,7 +107,7 @@ class RiskManager:
             risk_pct=risk_pct,
             entry_price=entry_price,
             stop_loss=stop_loss,
-            max_loss=max_loss,
+            max_loss=capital_at_risk,
         )
 
     # ------------------------------------------------------------------
