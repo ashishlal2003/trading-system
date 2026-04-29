@@ -327,12 +327,44 @@ class TelegramBot:
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Placeholder for open positions (to be wired to the position tracker)."""
-        text = (
-            "📂 *Open Positions*\n\n"
-            "_Use /status for now. Detailed position tracking is coming soon._"
+        """Show all currently open positions from the trade store."""
+        if not self.context_builder:
+            await update.message.reply_text("Position tracking not available.")
+            return
+
+        try:
+            positions = await self.context_builder.store.get_open_positions()
+        except Exception as e:
+            logger.error("handle_positions_failed", error=str(e))
+            await update.message.reply_text("Could not fetch positions. Try again.")
+            return
+
+        if not positions:
+            await update.message.reply_text(
+                "📂 *Open Positions*\n\nNo open positions right now.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        mode = "PAPER" if self.paper_trade else "LIVE"
+        lines = [f"📂 *Open Positions* _{mode}_\n"]
+        for p in positions:
+            symbol    = p.get("symbol", "?")
+            direction = p.get("direction", "?")
+            qty       = p.get("quantity", "?")
+            entry     = float(p.get("entry_price", 0))
+            sl        = float(p.get("stop_loss", 0))
+            target    = float(p.get("target_1", 0))
+            trade_type = p.get("trade_type", "?")
+            lines.append(
+                f"`{symbol}` {direction} {qty}qty [{trade_type}]\n"
+                f"  Entry ₹{entry:,.2f} | SL ₹{sl:,.2f} | T ₹{target:,.2f}"
+            )
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
         )
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
     async def _handle_help(
         self,

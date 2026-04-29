@@ -304,8 +304,27 @@ class TradingScheduler:
             self._cached_news = []
 
         # Keep context_builder's news_cache in sync so the chat LLM sees fresh headlines
-        if hasattr(self, 'context_builder') and self.context_builder:
+        if self.context_builder:
             self.context_builder.news_cache = self._cached_news
+
+        # --- Fetch NSE corporate announcements and cache ---
+        try:
+            intraday_symbols = self.watchlist.get("intraday", [])
+            if intraday_symbols:
+                self._cached_announcements = await self.nse_announcements.fetch_multiple(
+                    intraday_symbols, days_back=2
+                )
+                logger.info(
+                    "scheduler.pre_market_scan.announcements_cached",
+                    symbol_count=len(self._cached_announcements),
+                )
+        except Exception as exc:
+            logger.error(
+                "scheduler.pre_market_scan.announcements_fetch_error",
+                error=str(exc),
+                exc_info=True,
+            )
+            self._cached_announcements = {}
 
         # --- Verify Groww API is reachable ---
         try:
@@ -405,6 +424,29 @@ class TradingScheduler:
                 pass
             return
 
+        # Fetch live Groww prices for all successfully scanned symbols so the
+        # LLM uses the real current price, not a potentially stale yfinance close.
+        live_prices: dict[str, float] = {}
+        live_symbols = [r.symbol for r in scan_results if r.indicators is not None]
+        if live_symbols:
+            try:
+                quotes = await self.data_pipeline._market_data.get_multiple_quotes(
+                    live_symbols, exchange="NSE"
+                )
+                live_prices = {
+                    sym: q["ltp"] for sym, q in quotes.items()
+                    if q.get("ltp") and float(q["ltp"]) > 0
+                }
+                logger.info(
+                    "scheduler.intraday_scan.live_prices_fetched",
+                    count=len(live_prices),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "scheduler.intraday_scan.live_prices_failed",
+                    error=str(exc),
+                )
+
         # Alert if ALL symbols failed (likely expired Groww token)
         failed_results = [r for r in scan_results if r.error]
         if failed_results and len(failed_results) == len(scan_results):
@@ -451,6 +493,7 @@ class TradingScheduler:
                     indicators=result.indicators,
                     patterns=result.patterns,
                     news_summary=news_summary,
+                    live_price=live_prices.get(result.symbol),
                 )
 
                 if not signal.is_actionable:
@@ -649,7 +692,8 @@ class TradingScheduler:
                 quote = await self.data_pipeline._market_data.get_live_quote(
                     sym, exchange="NSE"
                 )
-                ltp = float(quote.get("ltp", quote.get("lastPrice", 0.0)))
+                raw = quote.get("last_price") or (quote.get("ohlc") or {}).get("close") or 0.0
+                ltp = float(raw)
                 if ltp > 0:
                     prices[sym] = ltp
                 else:

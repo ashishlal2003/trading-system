@@ -211,6 +211,7 @@ class LLMSignalEngine:
         indicators: IndicatorResult,
         patterns: Any | None,
         news_summary: str,
+        live_price: float | None = None,
     ) -> str:
         """Populate USER_PROMPT_TEMPLATE with live data."""
         # ------ Pattern fields ------
@@ -224,12 +225,15 @@ class LLMSignalEngine:
             patterns_detected = "None"
             patterns_bias = "NEUTRAL"
 
+        # Use Groww live price if available; fall back to last yfinance candle close
+        current_price = live_price if live_price is not None else indicators.close
+
         return USER_PROMPT_TEMPLATE.format(
             symbol=symbol,
             exchange=exchange,
             trade_type=trade_type,
             current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
-            current_price=self._format_float(indicators.close),
+            current_price=self._format_float(current_price),
             rsi_14=self._format_float(indicators.rsi_14),
             macd_line=self._format_float(indicators.macd_line, 4),
             macd_signal=self._format_float(indicators.macd_signal, 4),
@@ -264,6 +268,7 @@ class LLMSignalEngine:
         indicators: IndicatorResult | None,
         patterns: Any | None,
         news_summary: str,
+        live_price: float | None = None,
     ) -> TradeSignal:
         """
         Generate a trading signal for a single symbol.
@@ -312,6 +317,7 @@ class LLMSignalEngine:
                 indicators=indicators,
                 patterns=patterns,
                 news_summary=news_summary,
+                live_price=live_price,
             )
 
             # Step 3 — call OpenAI

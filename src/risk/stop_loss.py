@@ -15,9 +15,10 @@ class StopLossEnforcer:
     Intended to be called every 30 seconds by the scheduler.
     """
 
-    def __init__(self, order_manager, trade_store):
+    def __init__(self, order_manager, trade_store, telegram_bot=None):
         self.order_manager = order_manager
         self.store = trade_store
+        self.telegram_bot = telegram_bot
 
     # ------------------------------------------------------------------
     # Public entry-point (called by scheduler)
@@ -74,7 +75,26 @@ class StopLossEnforcer:
                     current_price=current_price,
                 )
                 await self._exit_position(pos, current_price, "SL_BREACH")
-                continue  # No further processing for this position
+                continue
+
+            # --- Target hit detection ---
+            target_1 = pos.get("target_1")
+            if target_1 is not None:
+                target_1 = float(target_1)
+                target_hit = (
+                    (direction == "BUY" and current_price >= target_1)
+                    or (direction == "SELL" and current_price <= target_1)
+                )
+                if target_hit:
+                    logger.info(
+                        "target_hit",
+                        symbol=symbol,
+                        position_id=pos["id"],
+                        target=target_1,
+                        current_price=current_price,
+                    )
+                    await self._exit_position(pos, current_price, "TARGET_HIT")
+                    continue
 
             # --- Trailing stop-loss: move to breakeven at 1R gain ---
             sl_moved = bool(pos.get("sl_moved_to_breakeven", 0))
@@ -246,3 +266,25 @@ class StopLossEnforcer:
                 reason=reason,
                 error=str(exc),
             )
+
+        if self.telegram_bot:
+            try:
+                mode_tag = "PAPER" if self.order_manager.paper_trade else "LIVE"
+                pnl_str = f"+₹{estimated_pnl:.2f}" if estimated_pnl >= 0 else f"-₹{abs(estimated_pnl):.2f}"
+                if reason == "TARGET_HIT":
+                    emoji = "🎯"
+                    label = "Target Hit"
+                elif reason == "SL_BREACH":
+                    emoji = "🛑"
+                    label = "Stop Loss Hit"
+                else:
+                    emoji = "📤"
+                    label = reason
+                await self.telegram_bot.send_message(
+                    f"{emoji} *{label} — {symbol}* [{mode_tag}]\n\n"
+                    f"Direction: `{direction}` | Qty: {quantity}\n"
+                    f"Entry: ₹{entry_price:.2f} → Exit: ₹{price:.2f}\n"
+                    f"P&L: `{pnl_str}`"
+                )
+            except Exception as exc:
+                logger.warning("exit_telegram_notify_failed", symbol=symbol, error=str(exc))

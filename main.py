@@ -251,21 +251,34 @@ async def main() -> None:
             5. Save the position to the trade store.
             6. Send a confirmation message via Telegram.
             """
-            symbol = signal.symbol if hasattr(signal, "symbol") else signal.get("symbol", "UNKNOWN")
+            symbol = signal.symbol
             logger.info(
                 "main.on_approve",
                 symbol=symbol,
-                action=getattr(signal, "action", signal.get("action")),
+                action=signal.action,
                 quantity=quantity,
             )
 
             # -- 1. Pre-trade check ------------------------------------------
-            entry_price = (
-                signal.entry_price if hasattr(signal, "entry_price")
-                else float(signal.get("entry_price", 0.0))
-            )
+            # Fetch live Groww price at approval time as the actual fill price.
+            # signal.entry_price (from yfinance close) is only used as fallback.
+            entry_price = signal.entry_price
+            try:
+                quote = await market_data.get_live_quote(symbol, exchange="NSE")
+                raw = quote.get("last_price") or (quote.get("ohlc") or {}).get("close") or 0.0
+                ltp = float(raw)
+                if ltp > 0:
+                    entry_price = ltp
+                    logger.info("main.on_approve.live_fill_price", symbol=symbol, ltp=ltp)
+            except Exception as exc:
+                logger.warning(
+                    "main.on_approve.live_price_failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+
             approved, reason = await risk_manager.pre_trade_check(
-                signal if isinstance(signal, dict) else signal.to_dict(),
+                signal.to_dict(),
                 entry_price,
             )
             if not approved:
@@ -283,10 +296,7 @@ async def main() -> None:
                 return
 
             # -- 2. Position size --------------------------------------------
-            stop_loss = (
-                signal.stop_loss if hasattr(signal, "stop_loss")
-                else float(signal.get("stop_loss", 0.0))
-            )
+            stop_loss = signal.stop_loss
             try:
                 pos_size = risk_manager.compute_position_size(
                     entry_price=entry_price,
@@ -298,25 +308,13 @@ async def main() -> None:
                 final_qty = max(1, quantity)
 
             # -- 3. Build OrderRequest ---------------------------------------
-            trade_type = (
-                signal.trade_type if hasattr(signal, "trade_type")
-                else signal.get("trade_type", "INTRADAY")
-            ).upper()
-            action = (
-                signal.action if hasattr(signal, "action")
-                else signal.get("action", "BUY")
-            ).upper()
-            target_1 = (
-                signal.target_1 if hasattr(signal, "target_1")
-                else float(signal.get("target_1", 0.0))
-            )
+            trade_type = signal.trade_type.upper()
+            action = signal.action.upper()
+            target_1 = signal.target_1
             exchange = "NSE"
 
             product_type = (
                 ProductType.DELIVERY if trade_type == "SWING" else ProductType.INTRADAY
-            )
-            order_type = (
-                OrderType.LIMIT if trade_type == "INTRADAY" else OrderType.LIMIT
             )
 
             entry_req = OrderRequest(
@@ -324,7 +322,7 @@ async def main() -> None:
                 exchange=exchange,
                 transaction_type=action,
                 quantity=final_qty,
-                order_type=order_type,
+                order_type=OrderType.LIMIT,
                 product_type=product_type,
                 price=entry_price,
                 trigger_price=0.0,
@@ -358,10 +356,7 @@ async def main() -> None:
 
             # -- 5. Save position to trade store -----------------------------
             try:
-                signal_dict = (
-                    signal.to_dict() if hasattr(signal, "to_dict") else dict(signal)
-                )
-                signal_id = await trade_store.save_signal(signal_dict)
+                signal_id = await trade_store.save_signal(signal.to_dict())
                 position_data = {
                     "symbol": symbol,
                     "exchange": exchange,
@@ -371,10 +366,7 @@ async def main() -> None:
                     "entry_price": entry_price,
                     "stop_loss": stop_loss,
                     "target_1": target_1,
-                    "target_2": (
-                        signal.target_2 if hasattr(signal, "target_2")
-                        else signal.get("target_2")
-                    ),
+                    "target_2": signal.target_2,
                     "entry_order_id": entry_order_id,
                     "gtt_id": gtt_id,
                     "status": "OPEN",
@@ -418,21 +410,15 @@ async def main() -> None:
 
             Logs the rejection and records the decision in the trade store.
             """
-            symbol = signal.symbol if hasattr(signal, "symbol") else signal.get("symbol", "UNKNOWN")
-            action = (
-                signal.action if hasattr(signal, "action") else signal.get("action", "UNKNOWN")
-            )
+            symbol = signal.symbol
             logger.info(
                 "main.on_reject",
                 symbol=symbol,
-                action=action,
+                action=signal.action,
             )
 
             try:
-                signal_dict = (
-                    signal.to_dict() if hasattr(signal, "to_dict") else dict(signal)
-                )
-                signal_id = await trade_store.save_signal(signal_dict)
+                signal_id = await trade_store.save_signal(signal.to_dict())
                 await trade_store.save_signal_decision(signal_id, "REJECTED")
                 logger.info(
                     "main.on_reject.decision_saved",
@@ -464,8 +450,9 @@ async def main() -> None:
             context_builder=context_builder,
         )
 
-        # Patch swing_tracker now that telegram_bot is available
+        # Patch components that need telegram_bot (constructed after them)
         swing_tracker.telegram_bot = telegram_bot
+        sl_enforcer.telegram_bot = telegram_bot
 
         # -----------------------------------------------------------------------
         # 7. Construct the scheduler
