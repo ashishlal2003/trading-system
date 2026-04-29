@@ -202,6 +202,19 @@ class TradingScheduler:
                 misfire_grace_time=300,
             )
 
+        # 7. Groww auth health check — 08:00 and 09:00 IST, Mon–Fri
+        #    Pings the holdings endpoint to confirm the token is still alive.
+        #    Sends ✅ on success and 🚨 on failure so you know before market opens.
+        for hour, check_id in ((8, "groww_auth_check_0800"), (9, "groww_auth_check_0900")):
+            self.scheduler.add_job(
+                self.check_groww_auth,
+                CronTrigger(hour=hour, minute=0, day_of_week="mon-fri", timezone=IST),
+                id=check_id,
+                name=f"Groww auth check ({hour:02d}:00 IST)",
+                replace_existing=True,
+                misfire_grace_time=120,
+            )
+
         # 6. Stop-loss monitor — every 30 seconds (all week, all day)
         #    The job itself bails out outside market hours via _is_market_hours().
         self.scheduler.add_job(
@@ -262,6 +275,31 @@ class TradingScheduler:
                 )
             except Exception:
                 pass
+
+    async def check_groww_auth(self) -> None:
+        """
+        Groww auth health check — runs at 08:00 and 09:00 IST.
+
+        Makes a lightweight call to /holdings/user to confirm the current
+        access token is valid.  Sends a Telegram message either way so you
+        can see the status before the market opens.
+        """
+        ist_time = datetime.now(IST).strftime("%I:%M %p")
+        logger.info("scheduler.check_groww_auth.start", time=ist_time)
+        try:
+            await self.data_pipeline._market_data.get_portfolio()
+            logger.info("scheduler.check_groww_auth.ok", time=ist_time)
+            await self.telegram_bot.send_message(
+                f"✅ *Groww auth OK* at {ist_time} IST — token is live and ready."
+            )
+        except Exception as exc:
+            logger.error("scheduler.check_groww_auth.failed", error=str(exc), exc_info=True)
+            await self.telegram_bot.send_message(
+                f"🚨 *Groww auth FAILED* at {ist_time} IST\n\n"
+                f"`{type(exc).__name__}: {str(exc)[:200]}`\n\n"
+                f"Paste a fresh API key from groww.in/trade-api into "
+                f"`GROWW_API_KEY` in `.env` and restart before 9:15 IST."
+            )
 
     async def pre_market_scan(self) -> None:
         """
@@ -325,22 +363,6 @@ class TradingScheduler:
                 exc_info=True,
             )
             self._cached_announcements = {}
-
-        # --- Verify Groww API is reachable ---
-        try:
-            await self.data_pipeline._market_data.get_portfolio()
-            logger.info("scheduler.pre_market_scan.groww_api_ok")
-        except Exception as exc:
-            logger.error("scheduler.pre_market_scan.groww_api_error", error=str(exc))
-            try:
-                await self.telegram_bot.send_message(
-                    f"🚨 *Groww API unreachable at pre-market check!*\n"
-                    f"`{type(exc).__name__}: {str(exc)[:200]}`\n\n"
-                    f"Token expired at 06:00 IST. Paste today's fresh API key from groww.in/trade-api "
-                    f"into GROWW_API_KEY in .env and restart before 9:15 IST."
-                )
-            except Exception:
-                pass
 
         # --- Pre-market Telegram summary ---
         try:
