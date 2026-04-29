@@ -95,6 +95,7 @@ class TradingScheduler:
         watchlist: dict,
         settings,
         context_builder=None,
+        groww_client=None,
     ) -> None:
         self.data_pipeline = data_pipeline
         self.llm_engine = llm_engine
@@ -107,6 +108,7 @@ class TradingScheduler:
         self.nse_announcements = nse_announcements
         self.trade_store = trade_store
         self.sl_enforcer = sl_enforcer
+        self.groww_client = groww_client
         self.watchlist = watchlist
         self.settings = settings
         self.context_builder = context_builder
@@ -189,7 +191,18 @@ class TradingScheduler:
             misfire_grace_time=300,
         )
 
-        # 5. Stop-loss monitor — every 30 seconds (all week, all day)
+        # 5. Daily TOTP token refresh — 06:05 IST
+        if self.groww_client:
+            self.scheduler.add_job(
+                self.refresh_groww_token,
+                CronTrigger(hour=6, minute=5, timezone=IST),
+                id="groww_token_refresh",
+                name="Groww TOTP token refresh (06:05 IST)",
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+
+        # 6. Stop-loss monitor — every 30 seconds (all week, all day)
         #    The job itself bails out outside market hours via _is_market_hours().
         self.scheduler.add_job(
             self.sl_monitor,
@@ -231,6 +244,24 @@ class TradingScheduler:
     # ------------------------------------------------------------------
     # Jobs
     # ------------------------------------------------------------------
+
+    async def refresh_groww_token(self) -> None:
+        logger.info("scheduler.refresh_groww_token.start")
+        try:
+            await self.groww_client.refresh_access_token()
+            logger.info("scheduler.refresh_groww_token.success")
+            try:
+                await self.telegram_bot.send_message("🔑 Groww token refreshed at 06:05 IST. Ready for today.")
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.error("scheduler.refresh_groww_token.failed", error=str(exc), exc_info=True)
+            try:
+                await self.telegram_bot.send_message(
+                    f"🚨 *Groww token refresh FAILED at 06:05 IST!*\n`{exc}`\nNo signals today."
+                )
+            except Exception:
+                pass
 
     async def pre_market_scan(self) -> None:
         """

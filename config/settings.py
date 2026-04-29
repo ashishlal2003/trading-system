@@ -26,6 +26,10 @@ class Settings(BaseSettings):
         default="https://api.groww.in/v1",
         description="Groww REST API base URL",
     )
+    GROWW_TOTP_SECRET: str = Field(
+        default="",
+        description="TOTP secret from Groww API dashboard (32-char string). Required to exchange the API key JWT for a live access token.",
+    )
 
     # ------------------------------------------------------------------ #
     # OpenAI / LLM
