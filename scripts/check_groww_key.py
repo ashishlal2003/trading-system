@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Quick sanity-check: verifies the Groww API key / TOTP in .env is still valid.
-Run this on the EC2 before market open each morning.
+Quick sanity-check: verifies the Groww API key in .env is still valid.
+Run this on the server before market open each morning after pasting the
+fresh API key from the Groww dashboard.
 
     python scripts/check_groww_key.py
 """
@@ -17,46 +18,26 @@ from src.broker.groww_client import GrowwClient, GrowwAPIError
 
 
 async def main() -> None:
-    print(f"Groww base URL  : {settings.GROWW_BASE_URL}")
-    print(f"API key prefix  : {settings.GROWW_API_KEY[:12]}...")
-    totp_configured = bool(settings.GROWW_TOTP_SECRET)
-    print(f"TOTP configured : {'YES' if totp_configured else 'NO (using static key)'}\n")
+    print(f"Groww base URL : {settings.GROWW_BASE_URL}")
+    print(f"API key prefix : {settings.GROWW_API_KEY[:20]}...\n")
 
     async with GrowwClient(
         api_key=settings.GROWW_API_KEY,
         api_secret=settings.GROWW_API_SECRET,
         base_url=settings.GROWW_BASE_URL,
-        totp_secret=settings.GROWW_TOTP_SECRET,
     ) as client:
 
-        # If TOTP is set, refresh first then test
-        if totp_configured:
-            print("Refreshing token via TOTP...")
-            try:
-                token = await client.refresh_access_token()
-                print(f"✅  TOTP refresh OK — new token prefix: {token[:12]}...\n")
-            except GrowwAPIError as e:
-                print(f"❌  TOTP refresh FAILED (HTTP {e.status_code}): {e.message}")
-                print("\nCheck that GROWW_TOTP_SECRET is the 32-char secret from Groww API dashboard.")
-                sys.exit(1)
-            except Exception as e:
-                print(f"⚠️  TOTP refresh error: {e}")
-                sys.exit(1)
-
-        # Test the token (refreshed or static) against a real endpoint
-        print("Testing API access...")
+        print("Testing API access via /holdings/user ...")
         try:
-            data = await client.get("/user/profile")
-            print(f"✅  API key is VALID — profile: {data}")
+            data = await client.get("/holdings/user")
+            print(f"✅  API key is VALID — holdings response: {str(data)[:200]}")
         except GrowwAPIError as e:
             if e.status_code in (401, 403):
                 print(f"❌  Token EXPIRED or INVALID (HTTP {e.status_code}): {e.message}")
-                if not totp_configured:
-                    print("\nFix: set GROWW_TOTP_SECRET in .env to enable auto-refresh, or manually renew GROWW_API_KEY.")
-                sys.exit(1)
+                print("\nFix: paste today's fresh API key from groww.in/trade-api into GROWW_API_KEY in .env")
             else:
                 print(f"⚠️  API returned HTTP {e.status_code}: {e.message}")
-                sys.exit(1)
+            sys.exit(1)
         except Exception as e:
             print(f"⚠️  Connection error: {e}")
             sys.exit(1)

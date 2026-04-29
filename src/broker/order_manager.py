@@ -41,6 +41,13 @@ class OrderManager:
     """
     Handles all order operations against Groww API.
     Supports PAPER_TRADE mode where orders are logged but not sent.
+
+    Endpoint reference (base: https://api.groww.in/v1):
+      Place order    : POST /order/create
+      Order status   : GET  /order/status/{order_id}
+      Cancel order   : POST /order/cancel
+      GTT create     : POST /order-advance/create
+      Positions      : GET  /positions/user
     """
 
     def __init__(self, client: GrowwClient, paper_trade: bool = True):
@@ -77,7 +84,7 @@ class OrderManager:
             }
 
         logger.info("placing_order", symbol=req.symbol, action=req.transaction_type, qty=req.quantity)
-        return await self.client.post("/orders/place", payload)
+        return await self.client.post("/order/create", payload)
 
     async def place_bracket_order(
         self,
@@ -121,26 +128,27 @@ class OrderManager:
             "quantity": entry.quantity,
             "stopLossPrice": stop_loss_price,
             "targetPrice": target_price,
-            "triggerType": "OCO",
+            "smartOrderType": "OCO",
             "productType": entry.product_type.value,
+            "transactionType": "SELL" if entry.transaction_type == "BUY" else "BUY",
         }
-        gtt_result = await self.client.post("/orders/gtt", gtt_payload)
-        logger.info("gtt_placed", symbol=entry.symbol, gtt_id=gtt_result.get("gtt_id"))
-        return {"entry_order_id": order_id, "gtt_id": gtt_result.get("gtt_id")}
+        gtt_result = await self.client.post("/order-advance/create", gtt_payload)
+        logger.info("gtt_placed", symbol=entry.symbol, gtt_id=gtt_result.get("smartOrderId"))
+        return {"entry_order_id": order_id, "gtt_id": gtt_result.get("smartOrderId")}
 
     async def get_order_status(self, order_id: str) -> dict:
-        return await self.client.get(f"/orders/{order_id}")
+        return await self.client.get(f"/order/status/{order_id}")
 
     async def cancel_order(self, order_id: str) -> dict:
         logger.info("cancelling_order", order_id=order_id)
         if self.paper_trade:
             return {"order_id": order_id, "status": "CANCELLED", "paper_trade": True}
-        return await self.client.delete(f"/orders/{order_id}")
+        return await self.client.post("/order/cancel", {"orderId": order_id})
 
     async def get_open_positions(self) -> list[dict]:
         """Returns open positions from broker (live)."""
         try:
-            data = await self.client.get("/user/positions")
+            data = await self.client.get("/positions/user")
             return data.get("positions", data.get("data", []))
         except Exception as e:
             logger.error("get_positions_failed", error=str(e))

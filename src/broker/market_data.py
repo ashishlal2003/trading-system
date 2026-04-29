@@ -1,5 +1,5 @@
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from src.broker.groww_client import GrowwClient
 from src.utils.logger import get_logger
 
@@ -18,6 +18,13 @@ INTERVAL_MAP = {
 class MarketDataService:
     """
     Fetches OHLCV candles and live quotes from Groww REST API.
+
+    Endpoint reference (base: https://api.groww.in/v1):
+      Historical candles : GET /historical/candles
+      Live quote         : GET /live-data/quote
+      Multiple LTPs      : GET /live-data/ltp
+      Holdings           : GET /holdings/user
+      Positions          : GET /positions/user
     """
 
     def __init__(self, client: GrowwClient):
@@ -40,7 +47,7 @@ class MarketDataService:
             "to": to_date.strftime("%Y-%m-%d"),
         }
         logger.info("fetch_candles", symbol=symbol, interval=interval)
-        data = await self.client.get("/market/candles", params=params)
+        data = await self.client.get("/historical/candles", params=params)
 
         candles = data.get("candles", data.get("data", []))
         if not candles:
@@ -54,14 +61,14 @@ class MarketDataService:
         return df.sort_values("timestamp").reset_index(drop=True)
 
     async def get_live_quote(self, symbol: str, exchange: str = "NSE") -> dict:
-        """Returns dict with ltp, bid, ask, day_high, day_low, volume, oi."""
-        data = await self.client.get("/market/quote", params={"symbol": symbol, "exchange": exchange})
+        """Returns dict with ltp and other quote fields."""
+        data = await self.client.get("/live-data/quote", params={"symbol": symbol, "exchange": exchange})
         return data.get("data", data)
 
     async def get_multiple_quotes(self, symbols: list[str], exchange: str = "NSE") -> dict[str, dict]:
-        """Returns {symbol: quote_dict} for all symbols."""
+        """Returns {symbol: ltp_dict} for all symbols via the LTP endpoint."""
         params = {"symbols": ",".join(symbols), "exchange": exchange}
-        data = await self.client.get("/market/quotes", params=params)
+        data = await self.client.get("/live-data/ltp", params=params)
         quotes = data.get("data", data)
         if isinstance(quotes, list):
             return {q["symbol"]: q for q in quotes}
@@ -69,10 +76,10 @@ class MarketDataService:
 
     async def get_portfolio(self) -> list[dict]:
         """Returns list of holdings: symbol, qty, avg_price, current_price."""
-        data = await self.client.get("/user/portfolio")
+        data = await self.client.get("/holdings/user")
         return data.get("holdings", data.get("data", []))
 
     async def get_positions(self) -> list[dict]:
         """Returns list of current day positions."""
-        data = await self.client.get("/user/positions")
+        data = await self.client.get("/positions/user")
         return data.get("positions", data.get("data", []))

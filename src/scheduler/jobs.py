@@ -95,7 +95,6 @@ class TradingScheduler:
         watchlist: dict,
         settings,
         context_builder=None,
-        groww_client=None,
     ) -> None:
         self.data_pipeline = data_pipeline
         self.llm_engine = llm_engine
@@ -108,7 +107,6 @@ class TradingScheduler:
         self.nse_announcements = nse_announcements
         self.trade_store = trade_store
         self.sl_enforcer = sl_enforcer
-        self.groww_client = groww_client  # needed for TOTP token refresh
         self.watchlist = watchlist
         self.settings = settings
         self.context_builder = context_builder
@@ -191,21 +189,7 @@ class TradingScheduler:
             misfire_grace_time=300,
         )
 
-        # 5. Daily TOTP token refresh — 06:05 IST every day
-        #    Groww access tokens expire at 06:00 IST. Runs 5 minutes after to
-        #    ensure Groww has cycled, then fetches a fresh token automatically.
-        #    Only registered when TOTP is configured.
-        if self.groww_client and getattr(self.settings, "GROWW_TOTP_SECRET", ""):
-            self.scheduler.add_job(
-                self.refresh_groww_token,
-                CronTrigger(hour=6, minute=5, timezone=IST),
-                id="groww_token_refresh",
-                name="Groww TOTP access token refresh (06:05 IST)",
-                replace_existing=True,
-                misfire_grace_time=300,
-            )
-
-        # 6. Stop-loss monitor — every 30 seconds (all week, all day)
+        # 5. Stop-loss monitor — every 30 seconds (all week, all day)
         #    The job itself bails out outside market hours via _is_market_hours().
         self.scheduler.add_job(
             self.sl_monitor,
@@ -247,35 +231,6 @@ class TradingScheduler:
     # ------------------------------------------------------------------
     # Jobs
     # ------------------------------------------------------------------
-
-    async def refresh_groww_token(self) -> None:
-        """
-        Refresh the Groww access token using TOTP at 06:05 IST daily.
-
-        Groww tokens expire at 06:00 IST. This job runs 5 minutes after to get
-        a fresh token so the pre-market scan at 09:00 and intraday scans start
-        with a valid credential — no manual intervention needed.
-        """
-        logger.info("scheduler.refresh_groww_token.start")
-        try:
-            await self.groww_client.refresh_access_token()
-            logger.info("scheduler.refresh_groww_token.success")
-            try:
-                await self.telegram_bot.send_message(
-                    "🔑 Groww access token refreshed automatically (06:05 IST). Ready for today's session."
-                )
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.error("scheduler.refresh_groww_token.failed", error=str(exc), exc_info=True)
-            try:
-                await self.telegram_bot.send_message(
-                    f"🚨 *Groww token refresh FAILED at 06:05 IST!*\n"
-                    f"`{type(exc).__name__}: {str(exc)[:200]}`\n\n"
-                    f"No signals will be generated today. Check your TOTP secret in .env."
-                )
-            except Exception:
-                pass
 
     async def pre_market_scan(self) -> None:
         """
@@ -331,7 +286,8 @@ class TradingScheduler:
                 await self.telegram_bot.send_message(
                     f"🚨 *Groww API unreachable at pre-market check!*\n"
                     f"`{type(exc).__name__}: {str(exc)[:200]}`\n\n"
-                    f"Your API key may have expired. Renew it on the EC2 before 9:15 IST or no signals will be generated today."
+                    f"Token expired at 06:00 IST. Paste today's fresh API key from groww.in/trade-api "
+                    f"into GROWW_API_KEY in .env and restart before 9:15 IST."
                 )
             except Exception:
                 pass
