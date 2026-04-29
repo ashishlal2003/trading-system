@@ -19,6 +19,8 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+import pytz
+
 import pandas as pd
 
 from src.broker.market_data import MarketDataService
@@ -89,6 +91,7 @@ _DAYS_BACK: dict[str, int] = {
     "swing": 60,
 }
 _DEFAULT_DAYS_BACK: int = 5
+_IST = pytz.timezone("Asia/Kolkata")
 
 
 class DataPipeline:
@@ -165,17 +168,17 @@ class DataPipeline:
         ScanResult
             Always returns a ScanResult.  Check ``result.error`` for failures.
         """
-        scanned_at = datetime.utcnow()
+        scanned_at = datetime.now(_IST)
         empty_df = pd.DataFrame(
             columns=["timestamp", "open", "high", "low", "close", "volume"]
         )
 
         try:
             # ------------------------------------------------------------------
-            # 1. Determine look-back window
+            # 1. Determine look-back window (IST dates so yfinance aligns with NSE)
             # ------------------------------------------------------------------
             days_back = _DAYS_BACK.get(mode, _DEFAULT_DAYS_BACK)
-            to_date = datetime.utcnow()
+            to_date = datetime.now(_IST)
             from_date = to_date - timedelta(days=days_back)
 
             logger.info(

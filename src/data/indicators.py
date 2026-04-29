@@ -173,19 +173,27 @@ def _atr(
 
 
 def _vwap(
+    timestamp: pd.Series,
     high: pd.Series,
     low: pd.Series,
     close: pd.Series,
     volume: pd.Series,
 ) -> pd.Series:
     """
-    Session VWAP — cumulative sum of (typical_price × volume) / cumulative volume.
+    Session VWAP — resets at the start of each trading day.
+
+    Groups candles by IST date so the cumulative sum restarts at 09:15 every
+    morning, giving a true intraday VWAP rather than a multi-day blended average.
 
     typical_price = (high + low + close) / 3
     """
     typical_price = (high + low + close) / 3.0
-    cum_tp_vol = (typical_price * volume).cumsum()
-    cum_vol = volume.cumsum()
+    tp_vol = typical_price * volume
+    # dt.date extracts the IST calendar date (yfinance returns IST-aware timestamps
+    # for .NS symbols), so groupby correctly resets at each session open.
+    dates = pd.to_datetime(timestamp).dt.date
+    cum_tp_vol = tp_vol.groupby(dates).cumsum()
+    cum_vol = volume.groupby(dates).cumsum()
     return cum_tp_vol / cum_vol.replace(0, np.nan)
 
 
@@ -312,7 +320,7 @@ class IndicatorEngine:
             # ------------------------------------------------------------------
             # VWAP
             # ------------------------------------------------------------------
-            vwap_s = _vwap(high, low, close, volume)
+            vwap_s = _vwap(df["timestamp"], high, low, close, volume)
 
             # ------------------------------------------------------------------
             # Extract last-row scalar values
