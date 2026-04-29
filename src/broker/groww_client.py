@@ -53,7 +53,7 @@ class GrowwClient:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as auth_client:
             response = await auth_client.post(
                 _AUTH_URL,
-                json={"key_type": "totp", "totp": code},
+                json={"key_type": "twofa", "totp": code},
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
