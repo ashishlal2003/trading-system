@@ -439,7 +439,12 @@ async def main() -> None:
         # 6. Construct chat engine and context builder, then TelegramBot
         # -----------------------------------------------------------------------
         chat_engine = ChatEngine(api_key=settings.OPENAI_API_KEY, model=settings.OPENAI_MODEL)
-        context_builder = ContextBuilder(trade_store=trade_store, news_cache=[])
+        context_builder = ContextBuilder(
+            trade_store=trade_store,
+            news_cache=[],
+            market_data=market_data,
+            watchlist_symbols=all_symbols,
+        )
 
         telegram_bot = TelegramBot(
             token=settings.TELEGRAM_BOT_TOKEN,
