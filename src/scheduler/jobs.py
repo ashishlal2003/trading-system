@@ -57,18 +57,30 @@ def _calc_charges(turnover: float, side: str = "both") -> float:
 # ---------------------------------------------------------------------------
 
 NSE_HOLIDAYS_2026: set[str] = {
+    # Fixed-date national holidays
     "2026-01-26",  # Republic Day
-    "2026-03-25",  # Holi
-    "2026-04-02",  # Ram Navami
-    "2026-04-14",  # Dr. Ambedkar Jayanti
-    "2026-04-17",  # Good Friday
     "2026-05-01",  # Maharashtra Day
     "2026-08-15",  # Independence Day
     "2026-10-02",  # Gandhi Jayanti
-    "2026-10-24",  # Diwali Laxmi Pujan
-    "2026-11-04",  # Diwali Balipratipada
-    "2026-11-25",  # Guru Nanak Jayanti
     "2026-12-25",  # Christmas
+
+    # Hindu festivals (lunar calendar — verify against NSE circular each year)
+    "2026-02-19",  # Mahashivratri
+    "2026-03-20",  # Holi (Dhuleti) — verify
+    "2026-04-06",  # Ram Navami — verify
+    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-08-14",  # Janmashtami — verify (may coincide with Independence Day)
+    "2026-10-21",  # Dussehra (Vijayadashami) — verify
+    "2026-11-08",  # Diwali Laxmi Pujan — verify
+    "2026-11-09",  # Diwali Balipratipada — verify
+    "2026-11-05",  # Guru Nanak Jayanti — verify
+
+    # Islamic holidays (moon-sighting dependent — approximate)
+    "2026-06-27",  # Eid ul-Adha (Bakri Id) — approximate
+    "2026-07-17",  # Muharram — approximate
+
+    # Christian
+    "2026-04-03",  # Good Friday (Easter = Apr 5, 2026)
 }
 
 
@@ -650,21 +662,59 @@ class TradingScheduler:
 
         logger.info("scheduler.pre_close_square_off.squaring_off", count=len(intraday))
 
-        import asyncio as _asyncio
-        from functools import partial as _partial
-        import yfinance as _yf
+        async def _get_exit_price(symbol: str) -> float:
+            """Groww live LTP at squareoff time, yfinance as fallback."""
+            try:
+                quote = await self.data_pipeline._market_data.get_live_quote(
+                    symbol, exchange="NSE"
+                )
+                raw = quote.get("last_price") or (quote.get("ohlc") or {}).get("close") or 0.0
+                ltp = float(raw)
+                if ltp > 0:
+                    return ltp
+            except Exception as exc:
+                logger.warning(
+                    "scheduler.pre_close_square_off.groww_price_failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+            # Fallback: yfinance last 1-min close
+            try:
+                import yfinance as _yf
+                from functools import partial as _partial
+                loop = asyncio.get_event_loop()
 
-        def _ltp(symbol: str) -> float:
-            hist = _yf.Ticker(f"{symbol}.NS").history(period="1d", interval="1m")
-            return float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
+                def _yf_ltp(sym: str) -> float:
+                    hist = _yf.Ticker(f"{sym}.NS").history(period="1d", interval="1m")
+                    return float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
 
-        loop = _asyncio.get_event_loop()
+                price = await loop.run_in_executor(None, _partial(_yf_ltp, symbol))
+                if price > 0:
+                    logger.info(
+                        "scheduler.pre_close_square_off.yfinance_fallback_used",
+                        symbol=symbol,
+                        price=price,
+                    )
+                    return price
+            except Exception as exc:
+                logger.warning(
+                    "scheduler.pre_close_square_off.yfinance_fallback_failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+            return 0.0
 
         for p in intraday:
             symbol = p["symbol"]
             pos_id = p["id"]
             try:
-                exit_price = await loop.run_in_executor(None, _partial(_ltp, symbol))
+                exit_price = await _get_exit_price(symbol)
+                if exit_price <= 0:
+                    logger.error(
+                        "scheduler.pre_close_square_off.no_price",
+                        symbol=symbol,
+                    )
+                    continue
                 await self.trade_store.close_position(pos_id, exit_price, "EOD_SQUAREOFF")
 
                 entry  = float(p["entry_price"])

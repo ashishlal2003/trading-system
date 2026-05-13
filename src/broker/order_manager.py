@@ -139,6 +139,81 @@ class OrderManager:
     async def get_order_status(self, order_id: str) -> dict:
         return await self.client.get(f"/order/status/{order_id}")
 
+    async def replace_gtt_stop_loss(
+        self,
+        gtt_id: str,
+        symbol: str,
+        exchange: str,
+        quantity: int,
+        direction: str,
+        product_type: ProductType,
+        new_stop_loss: float,
+        target_price: float,
+    ) -> str | None:
+        """
+        Update the stop-loss on a live GTT OCO order by cancelling the old
+        one and placing a new one with the revised SL.
+
+        In paper-trade mode this is a no-op because the GTT is simulated;
+        the DB is the only source of truth and has already been updated by
+        store.update_stop_loss() before this is called.
+
+        Returns the new gtt_id on success, None on failure.
+        """
+        if self.paper_trade:
+            logger.info(
+                "PAPER_TRADE_gtt_sl_update_skip",
+                symbol=symbol,
+                gtt_id=gtt_id,
+                new_stop_loss=new_stop_loss,
+            )
+            return gtt_id
+
+        # Cancel the stale GTT
+        try:
+            await self.client.delete(f"/order-advance/cancel/{gtt_id}")
+            logger.info("gtt_cancelled_for_sl_update", gtt_id=gtt_id, symbol=symbol)
+        except Exception as exc:
+            logger.warning(
+                "gtt_cancel_failed_sl_update",
+                gtt_id=gtt_id,
+                symbol=symbol,
+                error=str(exc),
+            )
+            # Carry on — still try to place the new GTT
+
+        # Exit direction is opposite to entry direction
+        exit_tx = "SELL" if direction.upper() == "BUY" else "BUY"
+        gtt_payload = {
+            "symbol": symbol,
+            "exchange": exchange,
+            "quantity": quantity,
+            "stopLossPrice": new_stop_loss,
+            "targetPrice": target_price,
+            "smartOrderType": "OCO",
+            "productType": product_type.value,
+            "transactionType": exit_tx,
+        }
+        try:
+            result = await self.client.post("/order-advance/create", gtt_payload)
+            new_gtt_id = result.get("smartOrderId")
+            logger.info(
+                "gtt_replaced_for_sl_update",
+                symbol=symbol,
+                old_gtt=gtt_id,
+                new_gtt=new_gtt_id,
+                new_stop_loss=new_stop_loss,
+            )
+            return new_gtt_id
+        except Exception as exc:
+            logger.error(
+                "gtt_replace_failed",
+                symbol=symbol,
+                gtt_id=gtt_id,
+                error=str(exc),
+            )
+            return None
+
     async def cancel_order(self, order_id: str) -> dict:
         logger.info("cancelling_order", order_id=order_id)
         if self.paper_trade:

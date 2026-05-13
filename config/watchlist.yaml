@@ -1,24 +1,22 @@
 intraday:
   - SBIN
-  - WIPRO
-  - IDEA
-  - IRFC
-  - NHPC
+  - ICICIBANK
+  - HDFCBANK
+  - AXISBANK
+  - IDFCFIRSTB
   - RECLTD
+  - RELIANCE
+  - INFY
+  - NHPC
   - NMDC
   - SAIL
-  - IDFCFIRSTB
   - SUZLON
-  - RELIANCE
-  - TCS
-  - INFY
 
 swing:
   - SBIN
-  - WIPRO
-  - IRFC
+  - ICICIBANK
+  - HDFCBANK
+  - RELIANCE
+  - INFY
   - NHPC
   - SUZLON
-  - RELIANCE
-  - TCS
-  - INFY

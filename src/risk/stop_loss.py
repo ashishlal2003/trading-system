@@ -111,7 +111,32 @@ class StopLossEnforcer:
                         r_multiple=round(r_multiple, 3),
                         new_sl=entry_price,
                     )
+                    # Update DB first so the in-memory state is consistent
+                    # even if the broker GTT update below fails.
                     await self.store.update_stop_loss(pos["id"], entry_price)
+
+                    # Sync the live broker GTT to the new stop-loss level.
+                    # No-op in paper mode; cancel+recreate in live mode.
+                    gtt_id = pos.get("gtt_id")
+                    target = pos.get("target_1")
+                    if gtt_id and target is not None:
+                        from src.broker.order_manager import ProductType
+                        trade_type = pos.get("trade_type", "INTRADAY").upper()
+                        product_type = (
+                            ProductType.INTRADAY
+                            if trade_type == "INTRADAY"
+                            else ProductType.DELIVERY
+                        )
+                        await self.order_manager.replace_gtt_stop_loss(
+                            gtt_id=gtt_id,
+                            symbol=symbol,
+                            exchange=pos.get("exchange", "NSE"),
+                            quantity=int(pos["quantity"]),
+                            direction=direction,
+                            product_type=product_type,
+                            new_stop_loss=entry_price,
+                            target_price=float(target),
+                        )
                 else:
                     logger.debug(
                         "stop_loss_check_ok",
