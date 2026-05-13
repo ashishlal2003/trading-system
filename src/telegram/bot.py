@@ -126,19 +126,14 @@ class TelegramBot:
 
     async def send_signal(self, signal, quantity: int) -> None:
         """
-        Send a formatted signal card to the operator with APPROVE / REJECT buttons.
+        Send a signal card and either auto-approve (paper mode) or wait for
+        operator decision (live mode).
 
-        The signal is stored in ``_pending`` until the operator responds or it
-        expires (stale keys are ignored at callback time).
-
-        Parameters
-        ----------
-        signal:
-            ``TradeSignal`` produced by the LLM engine.
-        quantity:
-            Number of shares / lots calculated by the risk manager.
+        Paper mode  — no buttons, auto-executes immediately and sends the
+                      "Order Placed [PAPER]" confirmation that on_approve fires.
+        Live mode   — sends Approve / Reject inline buttons and stores the
+                      signal in _pending until the operator responds.
         """
-        # Unique key: symbol + millisecond timestamp
         def _get(attr: str, default="UNK"):
             if isinstance(signal, dict):
                 return signal.get(attr, default)
@@ -148,9 +143,27 @@ class TelegramBot:
         ts_ms: int  = int(time.time() * 1000)
         key: str    = f"{symbol}_{ts_ms}"
 
-        self._pending[key] = {"signal": signal, "quantity": quantity}
-
         text = format_signal_card(signal, capital=self.capital, quantity=quantity)
+
+        if self.paper_trade:
+            # Paper mode: notify then auto-execute — no human in the loop
+            paper_text = text + "\n\n📋 _Paper mode — executing automatically..._"
+            try:
+                await self.app.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=paper_text,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.info("signal_paper_auto_approve", key=key, symbol=symbol, quantity=quantity)
+            except Exception:
+                logger.exception("send_signal_failed", key=key, symbol=symbol)
+                raise
+            # on_approve handles risk check, position save, and confirmation message
+            await self.on_approve(signal, quantity)
+            return
+
+        # Live mode: store pending and send with Approve / Reject buttons
+        self._pending[key] = {"signal": signal, "quantity": quantity}
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -169,7 +182,6 @@ class TelegramBot:
             logger.info("signal_sent", key=key, symbol=symbol, quantity=quantity)
         except Exception:
             logger.exception("send_signal_failed", key=key, symbol=symbol)
-            # Remove from pending so it doesn't linger on error
             self._pending.pop(key, None)
             raise
 
@@ -292,11 +304,15 @@ class TelegramBot:
         """Send a welcome message listing available commands."""
         user = update.effective_user
         name = user.first_name if user else "Trader"
+        mode_line = (
+            "Running in *paper trade mode* — signals auto-execute, no real money at risk."
+            if self.paper_trade else
+            "Running in *live mode* — I will send signals and wait for your approval."
+        )
         text = (
             f"👋 *Welcome, {name}!*\n\n"
             "I am your algorithmic trading assistant for NSE/BSE markets.\n\n"
-            "I will send you trade signals and wait for your approval before "
-            "placing any orders.\n\n"
+            f"{mode_line}\n\n"
             "*Available commands:*\n"
             "  /status    — System health & mode\n"
             "  /positions — Open swing positions\n"

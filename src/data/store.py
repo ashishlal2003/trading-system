@@ -7,9 +7,13 @@ Provides two stores:
 """
 
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+
+# All date comparisons for daily P&L use IST so the morning session
+# (before 05:30 UTC) is attributed to the correct calendar date.
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 import aiosqlite
 import pandas as pd
@@ -310,7 +314,7 @@ class TradeStore:
 
             direction, entry_price, quantity = row[0], row[1], row[2]
 
-            if direction.upper() == "SHORT":
+            if direction.upper() in ("SHORT", "SELL"):
                 pnl = (entry_price - exit_price) * quantity
             else:
                 pnl = (exit_price - entry_price) * quantity
@@ -335,8 +339,8 @@ class TradeStore:
     # ------------------------------------------------------------------
 
     async def get_daily_pnl(self) -> float:
-        """Return the sum of pnl for all positions closed today (UTC date)."""
-        today = date.today().isoformat()
+        """Return the sum of pnl for all positions closed today (IST date)."""
+        today = datetime.now(_IST).date().isoformat()
         sql = """
             SELECT COALESCE(SUM(pnl), 0.0)
             FROM positions
@@ -349,11 +353,11 @@ class TradeStore:
         return float(row[0]) if row else 0.0
 
     async def get_today_closed_trades(self) -> list[dict]:
-        """Return all positions closed today (UTC) ordered by exit_date.
+        """Return all positions closed today (IST) ordered by exit_date.
 
         Intended for the end-of-day summary report.
         """
-        today = date.today().isoformat()
+        today = datetime.now(_IST).date().isoformat()
         sql = """
             SELECT p.*, s.action, s.confidence, s.reasoning
             FROM positions p

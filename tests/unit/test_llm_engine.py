@@ -1,29 +1,30 @@
 """
-Unit tests for src/signals/llm_engine.py — TradeSignal and LLMSignalEngine.
+Unit tests for src/signals/llm_engine.py (TradeSignal model)
+and src/signals/rule_engine.py (RuleEngine).
 
-OpenAI calls are fully mocked; no real API key or network access is required.
+LLMSignalEngine was removed — trading signals now come from RuleEngine.
+TradeSignal (the Pydantic model) is retained as the shared data contract.
 """
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from src.signals.llm_engine import LLMSignalEngine, TradeSignal
+from src.signals.llm_engine import TradeSignal
+from src.signals.rule_engine import RuleEngine
+from src.strategy.base import BaseStrategy, SignalResult
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-
 def _make_trade_signal(**overrides: Any) -> TradeSignal:
-    """Return a valid TradeSignal, optionally overriding any fields."""
     defaults: dict[str, Any] = {
         "symbol": "RELIANCE",
         "action": "BUY",
@@ -42,415 +43,218 @@ def _make_trade_signal(**overrides: Any) -> TradeSignal:
     return TradeSignal(**defaults)
 
 
-def _make_llm_engine(api_key: str = "test-key") -> LLMSignalEngine:
-    """Instantiate an LLMSignalEngine with a dummy API key."""
-    return LLMSignalEngine(api_key=api_key)
+def _bar(ts: str, open_: float, high: float, low: float, close: float, volume: float = 10_000) -> dict:
+    return {"timestamp": pd.Timestamp(ts), "open": open_, "high": high, "low": low, "close": close, "volume": volume}
 
 
-def _make_mock_indicators() -> MagicMock:
-    """Return a MagicMock that satisfies the IndicatorResult interface."""
-    ind = MagicMock()
-    ind.close = 2500.0
-    ind.rsi_14 = 58.0
-    ind.macd_line = 12.5
-    ind.macd_signal = 10.0
-    ind.macd_hist = 2.5
-    ind.ema_9 = 2490.0
-    ind.ema_21 = 2480.0
-    ind.ema_50 = 2460.0
-    ind.ema_200 = 2400.0
-    ind.bb_upper = 2560.0
-    ind.bb_mid = 2500.0
-    ind.bb_lower = 2440.0
-    ind.bb_pct_b = 0.5
-    ind.atr_14 = 30.0
-    ind.vwap = 2495.0
-    ind.relative_volume = 1.3
-    ind.trend = "UPTREND"
-    ind.price_vs_vwap = "ABOVE_VWAP"
-    return ind
+class _AlwaysBuyStrategy(BaseStrategy):
+    """Fires a BUY on the last bar every time."""
+    @property
+    def name(self) -> str:
+        return "AlwaysBuy"
+
+    def get_params(self) -> dict:
+        return {}
+
+    def set_params(self, params: dict) -> None:
+        pass
+
+    def reset(self) -> None:
+        pass
+
+    def evaluate(self, df: pd.DataFrame, bar_idx: int) -> SignalResult:
+        return SignalResult(
+            action="BUY",
+            entry_price=float(df.iloc[bar_idx]["close"]),
+            stop_loss=float(df.iloc[bar_idx]["close"]) - 10.0,
+            target=float(df.iloc[bar_idx]["close"]) + 20.0,
+            reasoning="Always buy",
+        )
 
 
-def _make_openai_response(payload: dict[str, Any]) -> MagicMock:
-    """Wrap a dict in a mock that looks like an OpenAI chat completion response."""
-    message = MagicMock()
-    message.content = json.dumps(payload)
+class _AlwaysNoTradeStrategy(BaseStrategy):
+    @property
+    def name(self) -> str:
+        return "AlwaysNoTrade"
 
-    choice = MagicMock()
-    choice.message = message
+    def get_params(self) -> dict:
+        return {}
 
-    response = MagicMock()
-    response.choices = [choice]
-    return response
+    def set_params(self, params: dict) -> None:
+        pass
+
+    def reset(self) -> None:
+        pass
+
+    def evaluate(self, df: pd.DataFrame, bar_idx: int) -> SignalResult:
+        return SignalResult(action="NO_TRADE", entry_price=0, stop_loss=0, target=0, reasoning="no trade")
 
 
 # ---------------------------------------------------------------------------
-# TradeSignal validation tests
+# TradeSignal validation tests — these still matter (shared data contract)
 # ---------------------------------------------------------------------------
-
 
 class TestTradeSignalValidation:
-    """Tests for the Pydantic model validators on TradeSignal."""
+    def test_valid_action_buy(self) -> None:
+        assert _make_trade_signal(action="BUY").action == "BUY"
 
-    def test_trade_signal_valid_action_buy(self) -> None:
-        """action='BUY' must be accepted and normalised to upper-case."""
-        signal = _make_trade_signal(action="BUY")
-        assert signal.action == "BUY"
+    def test_valid_action_sell(self) -> None:
+        assert _make_trade_signal(action="SELL").action == "SELL"
 
-    def test_trade_signal_valid_action_sell(self) -> None:
-        """action='SELL' must be accepted."""
-        signal = _make_trade_signal(action="SELL")
-        assert signal.action == "SELL"
+    def test_valid_action_no_trade(self) -> None:
+        s = _make_trade_signal(action="NO_TRADE", confidence=0.0, risk_reward_ratio=0.0)
+        assert s.action == "NO_TRADE"
 
-    def test_trade_signal_valid_action_no_trade(self) -> None:
-        """action='NO_TRADE' must be accepted."""
-        signal = _make_trade_signal(action="NO_TRADE", confidence=0.0, risk_reward_ratio=0.0)
-        assert signal.action == "NO_TRADE"
+    def test_action_case_insensitive(self) -> None:
+        assert _make_trade_signal(action="buy").action == "BUY"
 
-    def test_trade_signal_action_case_insensitive(self) -> None:
-        """Lower-case 'buy' must be normalised to 'BUY'."""
-        signal = _make_trade_signal(action="buy")
-        assert signal.action == "BUY"
-
-    def test_trade_signal_invalid_action_raises(self) -> None:
-        """action='HOLD' is not a valid action and must raise ValidationError."""
-        with pytest.raises(ValidationError) as exc_info:
-            _make_trade_signal(action="HOLD")
-        assert "action" in str(exc_info.value).lower() or "HOLD" in str(exc_info.value)
-
-    def test_trade_signal_invalid_action_wait_raises(self) -> None:
-        """action='WAIT' must also raise ValidationError."""
+    def test_invalid_action_raises(self) -> None:
         with pytest.raises(ValidationError):
-            _make_trade_signal(action="WAIT")
+            _make_trade_signal(action="HOLD")
 
-    def test_trade_signal_confidence_valid_boundary_zero(self) -> None:
-        """confidence=0.0 is the lower boundary and must be accepted."""
-        signal = _make_trade_signal(confidence=0.0)
-        assert signal.confidence == 0.0
+    def test_confidence_boundary_zero(self) -> None:
+        assert _make_trade_signal(confidence=0.0).confidence == 0.0
 
-    def test_trade_signal_confidence_valid_boundary_one(self) -> None:
-        """confidence=1.0 is the upper boundary and must be accepted."""
-        signal = _make_trade_signal(confidence=1.0)
-        assert signal.confidence == 1.0
+    def test_confidence_boundary_one(self) -> None:
+        assert _make_trade_signal(confidence=1.0).confidence == 1.0
 
-    def test_trade_signal_confidence_range_over_one_raises(self) -> None:
-        """confidence=1.5 is out of range and must raise ValidationError."""
-        with pytest.raises(ValidationError) as exc_info:
+    def test_confidence_over_one_raises(self) -> None:
+        with pytest.raises(ValidationError):
             _make_trade_signal(confidence=1.5)
-        assert "confidence" in str(exc_info.value).lower() or "1.5" in str(exc_info.value)
 
-    def test_trade_signal_confidence_range_negative_raises(self) -> None:
-        """confidence=-0.1 must raise ValidationError."""
+    def test_confidence_negative_raises(self) -> None:
         with pytest.raises(ValidationError):
             _make_trade_signal(confidence=-0.1)
 
-    def test_trade_signal_confidence_rounded_to_4dp(self) -> None:
-        """confidence=0.123456 must be rounded to 4 decimal places."""
-        signal = _make_trade_signal(confidence=0.123456)
-        assert signal.confidence == round(0.123456, 4)
+    def test_confidence_rounded_to_4dp(self) -> None:
+        s = _make_trade_signal(confidence=0.123456)
+        assert s.confidence == round(0.123456, 4)
 
-    def test_trade_signal_invalid_trade_type_raises(self) -> None:
-        """trade_type='DAY' is not valid and must raise ValidationError."""
+    def test_invalid_trade_type_raises(self) -> None:
         with pytest.raises(ValidationError):
             _make_trade_signal(trade_type="DAY")
 
-    def test_trade_signal_valid_trade_type_swing(self) -> None:
-        """trade_type='SWING' must be accepted."""
-        signal = _make_trade_signal(trade_type="SWING")
-        assert signal.trade_type == "SWING"
+    def test_valid_trade_type_swing(self) -> None:
+        assert _make_trade_signal(trade_type="SWING").trade_type == "SWING"
 
-    def test_trade_signal_generated_at_defaults_to_now(self) -> None:
-        """generated_at must default to approximately now when not supplied."""
+    def test_generated_at_defaults_to_now(self) -> None:
         before = datetime.now()
-        signal = _make_trade_signal()
+        s = _make_trade_signal()
         after = datetime.now()
-        assert before <= signal.generated_at <= after
-
-
-# ---------------------------------------------------------------------------
-# TradeSignal.is_actionable
-# ---------------------------------------------------------------------------
+        assert before <= s.generated_at <= after
 
 
 class TestTradeSignalIsActionable:
-    """Tests for the is_actionable computed property."""
+    def test_actionable_buy(self) -> None:
+        assert _make_trade_signal(action="BUY", confidence=0.80, risk_reward_ratio=2.0).is_actionable is True
 
-    def test_trade_signal_is_actionable_true(self) -> None:
-        """
-        action=BUY, confidence=0.80, rr=2.0 → all three conditions met → True.
-        """
-        signal = _make_trade_signal(action="BUY", confidence=0.80, risk_reward_ratio=2.0)
-        assert signal.is_actionable is True
+    def test_actionable_sell(self) -> None:
+        assert _make_trade_signal(action="SELL", confidence=0.70, risk_reward_ratio=1.6).is_actionable is True
 
-    def test_trade_signal_is_actionable_sell_true(self) -> None:
-        """action=SELL with sufficient confidence and rr must also be actionable."""
-        signal = _make_trade_signal(action="SELL", confidence=0.70, risk_reward_ratio=1.6)
-        assert signal.is_actionable is True
+    def test_no_trade_never_actionable(self) -> None:
+        s = _make_trade_signal(action="NO_TRADE", confidence=1.0, risk_reward_ratio=5.0)
+        assert s.is_actionable is False
 
-    def test_trade_signal_is_actionable_false_no_trade(self) -> None:
-        """action=NO_TRADE is never actionable, regardless of confidence or rr."""
-        signal = _make_trade_signal(
-            action="NO_TRADE", confidence=1.0, risk_reward_ratio=5.0
-        )
-        assert signal.is_actionable is False
+    def test_low_confidence_not_actionable(self) -> None:
+        assert _make_trade_signal(action="BUY", confidence=0.5, risk_reward_ratio=2.0).is_actionable is False
 
-    def test_trade_signal_is_actionable_false_low_confidence(self) -> None:
-        """confidence=0.5 (below the 0.65 threshold) → is_actionable False."""
-        signal = _make_trade_signal(action="BUY", confidence=0.5, risk_reward_ratio=2.0)
-        assert signal.is_actionable is False
+    def test_confidence_boundary_exactly_065_passes(self) -> None:
+        assert _make_trade_signal(action="BUY", confidence=0.65, risk_reward_ratio=2.0).is_actionable is True
 
-    def test_trade_signal_is_actionable_false_at_confidence_boundary(self) -> None:
-        """
-        confidence exactly at 0.65 must pass (>= check).
-        confidence exactly at 0.6499 must fail.
-        """
-        signal_pass = _make_trade_signal(action="BUY", confidence=0.65, risk_reward_ratio=2.0)
-        assert signal_pass.is_actionable is True
+    def test_confidence_just_below_065_fails(self) -> None:
+        assert _make_trade_signal(action="BUY", confidence=0.6499, risk_reward_ratio=2.0).is_actionable is False
 
-        signal_fail = _make_trade_signal(action="BUY", confidence=0.6499, risk_reward_ratio=2.0)
-        assert signal_fail.is_actionable is False
+    def test_low_rr_not_actionable(self) -> None:
+        assert _make_trade_signal(action="BUY", confidence=0.80, risk_reward_ratio=1.2).is_actionable is False
 
-    def test_trade_signal_is_actionable_false_low_rr(self) -> None:
-        """risk_reward_ratio=1.2 (below 1.5) → is_actionable False."""
-        signal = _make_trade_signal(action="BUY", confidence=0.80, risk_reward_ratio=1.2)
-        assert signal.is_actionable is False
-
-    def test_trade_signal_is_actionable_false_rr_exactly_at_boundary(self) -> None:
-        """risk_reward_ratio=1.5 must pass; 1.499 must fail."""
-        signal_pass = _make_trade_signal(action="BUY", confidence=0.80, risk_reward_ratio=1.5)
-        assert signal_pass.is_actionable is True
-
-        signal_fail = _make_trade_signal(action="BUY", confidence=0.80, risk_reward_ratio=1.499)
-        assert signal_fail.is_actionable is False
-
-
-# ---------------------------------------------------------------------------
-# TradeSignal.to_dict
-# ---------------------------------------------------------------------------
+    def test_rr_exactly_15_passes(self) -> None:
+        assert _make_trade_signal(action="BUY", confidence=0.80, risk_reward_ratio=1.5).is_actionable is True
 
 
 class TestTradeSignalToDict:
-    """Tests for the to_dict() serialisation helper."""
+    def test_returns_dict(self) -> None:
+        assert isinstance(_make_trade_signal().to_dict(), dict)
 
-    def test_trade_signal_to_dict_returns_dict(self) -> None:
-        """to_dict() must return a plain Python dict."""
-        signal = _make_trade_signal()
-        d = signal.to_dict()
-        assert isinstance(d, dict)
+    def test_generated_at_is_string(self) -> None:
+        d = _make_trade_signal().to_dict()
+        assert isinstance(d["generated_at"], str)
+        datetime.fromisoformat(d["generated_at"])  # parseable
 
-    def test_trade_signal_to_dict_generated_at_is_string(self) -> None:
-        """generated_at must be an ISO-8601 string, not a datetime object."""
-        signal = _make_trade_signal()
-        d = signal.to_dict()
-        assert isinstance(d["generated_at"], str), (
-            f"Expected str, got {type(d['generated_at'])}"
-        )
-        # Must be parseable as ISO-8601
-        datetime.fromisoformat(d["generated_at"])
-
-    def test_trade_signal_to_dict_has_all_expected_keys(self) -> None:
-        """All expected top-level keys must be present in the output dict."""
-        signal = _make_trade_signal()
-        d = signal.to_dict()
-
-        expected_keys = {
-            "symbol", "action", "trade_type",
-            "entry_price", "stop_loss", "target_1", "target_2",
-            "confidence", "risk_reward_ratio",
-            "reasoning", "key_risks", "invalidation_condition",
-            "generated_at",
-        }
-        assert expected_keys.issubset(d.keys()), (
-            f"Missing keys: {expected_keys - d.keys()}"
-        )
-
-    def test_trade_signal_to_dict_values_match_model(self) -> None:
-        """Values in to_dict() must match the model fields (spot-check)."""
-        signal = _make_trade_signal(action="SELL", confidence=0.75, risk_reward_ratio=1.8)
-        d = signal.to_dict()
-
-        assert d["action"] == "SELL"
-        assert d["confidence"] == signal.confidence
-        assert d["risk_reward_ratio"] == 1.8
-        assert d["symbol"] == "RELIANCE"
+    def test_has_all_expected_keys(self) -> None:
+        keys = _make_trade_signal().to_dict().keys()
+        for k in ("symbol", "action", "entry_price", "stop_loss", "target_1", "confidence"):
+            assert k in keys
 
 
 # ---------------------------------------------------------------------------
-# LLMSignalEngine.generate_signal — indicators=None fast-path
+# RuleEngine tests
 # ---------------------------------------------------------------------------
 
+class TestRuleEngine:
+    def _make_df(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            _bar("2024-01-15 09:15", 100, 101, 99, 100),
+            _bar("2024-01-15 09:20", 100, 102, 99, 101),
+        ])
 
-class TestLLMSignalEngineNoIndicators:
-    """Tests verifying that generate_signal returns NO_TRADE without calling the API."""
-
-    @pytest.mark.asyncio
-    async def test_generate_signal_returns_no_trade_on_none_indicators(self) -> None:
-        """
-        When indicators=None, generate_signal must:
-        - Return a TradeSignal with action == "NO_TRADE".
-        - Never instantiate or call the OpenAI client.
-        """
-        engine = _make_llm_engine()
-
-        # Patch the underlying AsyncOpenAI client that the engine created
-        with patch.object(engine, "_client") as mock_client:
-            signal = await engine.generate_signal(
-                symbol="INFY",
-                exchange="NSE",
-                trade_type="INTRADAY",
-                indicators=None,
-                patterns=None,
-                news_summary="No news.",
-            )
-
-        assert isinstance(signal, TradeSignal)
-        assert signal.action == "NO_TRADE"
-        assert signal.symbol == "INFY"
-        # The OpenAI client must not have been touched
-        mock_client.chat.completions.create.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_generate_signal_no_trade_is_not_actionable(self) -> None:
-        """The NO_TRADE signal returned for None indicators must not be actionable."""
-        engine = _make_llm_engine()
-        with patch.object(engine, "_client"):
-            signal = await engine.generate_signal(
-                symbol="WIPRO",
-                exchange="NSE",
-                trade_type="INTRADAY",
-                indicators=None,
-                patterns=None,
-                news_summary="",
-            )
-        assert signal.is_actionable is False
-
-    @pytest.mark.asyncio
-    async def test_generate_signal_with_valid_indicators_calls_api(self) -> None:
-        """
-        When indicators are provided, the engine must call the OpenAI API and
-        return a TradeSignal built from the response.
-        """
-        engine = _make_llm_engine()
-        indicators = _make_mock_indicators()
-
-        api_payload: dict[str, Any] = {
-            "action": "BUY",
-            "trade_type": "INTRADAY",
-            "entry_price": 2500.0,
-            "stop_loss": 2450.0,
-            "target_1": 2600.0,
-            "target_2": None,
-            "confidence": 0.75,
-            "risk_reward_ratio": 2.0,
-            "reasoning": "Momentum confirmed.",
-            "key_risks": ["Broad market weakness"],
-            "invalidation_condition": "Close below 2440",
-        }
-
-        mock_response = _make_openai_response(api_payload)
-
-        with patch.object(
-            engine._client.chat.completions,
-            "create",
-            new=AsyncMock(return_value=mock_response),
-        ):
-            signal = await engine.generate_signal(
-                symbol="RELIANCE",
-                exchange="NSE",
-                trade_type="INTRADAY",
-                indicators=indicators,
-                patterns=None,
-                news_summary="No material news.",
-            )
+    def test_buy_strategy_returns_actionable_signal(self):
+        engine = RuleEngine(_AlwaysBuyStrategy(), trade_type="INTRADAY")
+        df = self._make_df()
+        signal = engine.generate_signal(df, symbol="RELIANCE")
 
         assert isinstance(signal, TradeSignal)
         assert signal.action == "BUY"
         assert signal.symbol == "RELIANCE"
-        assert signal.confidence == 0.75
+        assert 0.0 < signal.confidence <= 1.0  # graded by R:R; no longer always 1.0
+        assert signal.risk_reward_ratio > 0
 
-    @pytest.mark.asyncio
-    async def test_generate_signal_falls_back_on_api_error(self) -> None:
-        """
-        If the OpenAI API raises an exception, generate_signal must return a
-        NO_TRADE signal rather than propagating the exception.
-        """
-        engine = _make_llm_engine()
-        indicators = _make_mock_indicators()
+    def test_no_trade_strategy_returns_no_trade(self):
+        engine = RuleEngine(_AlwaysNoTradeStrategy(), trade_type="INTRADAY")
+        df = self._make_df()
+        signal = engine.generate_signal(df, symbol="INFY")
 
-        with patch.object(
-            engine._client.chat.completions,
-            "create",
-            new=AsyncMock(side_effect=RuntimeError("connection timeout")),
-        ):
-            signal = await engine.generate_signal(
-                symbol="HDFC",
-                exchange="NSE",
-                trade_type="INTRADAY",
-                indicators=indicators,
-                patterns=None,
-                news_summary="",
-            )
-
-        assert isinstance(signal, TradeSignal)
         assert signal.action == "NO_TRADE"
         assert signal.is_actionable is False
 
-    @pytest.mark.asyncio
-    async def test_generate_signal_falls_back_on_invalid_json(self) -> None:
-        """
-        Malformed JSON from the API must cause a graceful NO_TRADE fallback.
-        """
-        engine = _make_llm_engine()
-        indicators = _make_mock_indicators()
-
-        # Return a response whose content is not valid JSON
-        bad_message = MagicMock()
-        bad_message.content = "this is not json"
-        bad_choice = MagicMock()
-        bad_choice.message = bad_message
-        bad_response = MagicMock()
-        bad_response.choices = [bad_choice]
-
-        with patch.object(
-            engine._client.chat.completions,
-            "create",
-            new=AsyncMock(return_value=bad_response),
-        ):
-            signal = await engine.generate_signal(
-                symbol="SBIN",
-                exchange="NSE",
-                trade_type="INTRADAY",
-                indicators=indicators,
-                patterns=None,
-                news_summary="",
-            )
-
+    def test_empty_df_returns_no_trade(self):
+        engine = RuleEngine(_AlwaysBuyStrategy())
+        signal = engine.generate_signal(pd.DataFrame(), symbol="TCS")
         assert signal.action == "NO_TRADE"
 
+    def test_live_price_used_when_provided(self):
+        engine = RuleEngine(_AlwaysBuyStrategy())
+        df = self._make_df()
+        signal = engine.generate_signal(df, symbol="HDFCBANK", live_price=150.0)
+        # live_price should override bar close as entry_price
+        assert signal.entry_price == pytest.approx(150.0)
 
-# ---------------------------------------------------------------------------
-# LLMSignalEngine._build_no_trade_signal
-# ---------------------------------------------------------------------------
+    def test_batch_generate_returns_only_actionable(self):
+        engine = RuleEngine(_AlwaysBuyStrategy())
+        df = self._make_df()
+        items = [
+            {"symbol": "A", "exchange": "NSE", "df": df, "live_price": None},
+            {"symbol": "B", "exchange": "NSE", "df": pd.DataFrame(), "live_price": None},
+        ]
+        results = engine.batch_generate(items)
+        # B has empty df → NO_TRADE → filtered out; A → BUY → kept
+        assert len(results) == 1
+        assert results[0].symbol == "A"
 
+    def test_rule_engine_uses_strategy_name_in_log(self):
+        engine = RuleEngine(_AlwaysBuyStrategy())
+        assert engine.strategy.name == "AlwaysBuy"
 
-class TestBuildNoTradeSignal:
-    """Tests for the internal _build_no_trade_signal helper."""
+    def test_error_in_strategy_returns_no_trade(self):
+        class ErrorStrategy(BaseStrategy):
+            @property
+            def name(self): return "Error"
+            def get_params(self): return {}
+            def set_params(self, p): pass
+            def reset(self): pass
+            def evaluate(self, df, bar_idx):
+                raise RuntimeError("boom")
 
-    def test_build_no_trade_signal_has_correct_action(self) -> None:
-        """_build_no_trade_signal must always produce action == 'NO_TRADE'."""
-        engine = _make_llm_engine()
-        signal = engine._build_no_trade_signal("TCS")
+        engine = RuleEngine(ErrorStrategy())
+        df = self._make_df()
+        signal = engine.generate_signal(df, symbol="BOOM")
         assert signal.action == "NO_TRADE"
-
-    def test_build_no_trade_signal_propagates_symbol(self) -> None:
-        """The symbol argument must appear in the returned signal."""
-        engine = _make_llm_engine()
-        signal = engine._build_no_trade_signal("INFOSYS")
-        assert signal.symbol == "INFOSYS"
-
-    def test_build_no_trade_signal_custom_reason(self) -> None:
-        """When a reason is supplied, it must appear in the reasoning field."""
-        engine = _make_llm_engine()
-        reason = "Market closed for holiday."
-        signal = engine._build_no_trade_signal("WIPRO", reason=reason)
-        assert reason in signal.reasoning

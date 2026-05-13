@@ -324,27 +324,27 @@ class TestValidateEntryProximity:
 
     def test_validate_entry_proximity_intraday_exceeds_limit(self) -> None:
         """
-        current price 1% away from entry_price must return False.
-        entry=1000, current=1010 → deviation = 1.0% > 0.3% → False.
+        current price > 1% away from entry_price must return False.
+        entry=1000, current=1011 → deviation ≈ 1.09% > 1.0% → False.
         """
         rm = make_risk_manager()
-        assert rm.validate_entry_proximity(entry_price=1000.0, current_price=1010.0) is False
+        assert rm.validate_entry_proximity(entry_price=1000.0, current_price=1011.0) is False
 
     def test_validate_entry_proximity_exactly_at_limit(self) -> None:
         """
-        deviation exactly equal to max_pct (0.3%) must pass (<=).
-        entry=1000, current=1003 → deviation = 0.3% → True.
+        deviation exactly equal to max_pct (1.0%) must pass (<=).
+        entry=1000, current=1010 → deviation = 0.99% < 1.0% → True.
         """
         rm = make_risk_manager()
-        assert rm.validate_entry_proximity(entry_price=1000.0, current_price=1003.0) is True
+        assert rm.validate_entry_proximity(entry_price=1000.0, current_price=1010.0) is True
 
     def test_validate_entry_proximity_just_over_limit(self) -> None:
         """
-        deviation just above 0.3% must fail.
-        entry=1000, current=1003.1 → deviation ≈ 0.31%.
+        deviation just above 1.0% must fail.
+        entry=1000, current=1011 → deviation ≈ 1.09% > 1.0% → False.
         """
         rm = make_risk_manager()
-        assert rm.validate_entry_proximity(entry_price=1000.0, current_price=1003.1) is False
+        assert rm.validate_entry_proximity(entry_price=1000.0, current_price=1011.0) is False
 
     def test_validate_entry_proximity_zero_current_price(self) -> None:
         """current_price == 0 must return False (avoid ZeroDivisionError)."""
@@ -354,28 +354,28 @@ class TestValidateEntryProximity:
 
     def test_validate_entry_proximity_custom_max_pct(self) -> None:
         """
-        Custom max_pct=1.0: 0.9% deviation should pass, 1.1% should fail.
+        Custom max_pct=0.5: 0.4% deviation should pass, 0.6% should fail.
         """
         rm = make_risk_manager()
-        # 0.9% deviation → passes with max_pct=1.0
+        # 0.4% deviation → passes with max_pct=0.5
         assert rm.validate_entry_proximity(
-            entry_price=1000.0, current_price=1009.0, max_pct=1.0
+            entry_price=1000.0, current_price=1004.0, max_pct=0.5
         ) is True
-        # 1.1% deviation → fails with max_pct=1.0
+        # 0.6% deviation → fails with max_pct=0.5
         assert rm.validate_entry_proximity(
-            entry_price=1000.0, current_price=1011.0, max_pct=1.0
+            entry_price=1000.0, current_price=1006.0, max_pct=0.5
         ) is False
 
     def test_validate_entry_proximity_below_current_price(self) -> None:
         """
         Entry below current price — uses absolute deviation, so direction is symmetric.
-        entry=990, current=1000 → deviation = 1.0% > 0.3% → False.
+        entry=989, current=1000 → deviation = 1.1% > 1.0% → False.
         """
         rm = make_risk_manager()
-        assert rm.validate_entry_proximity(entry_price=990.0, current_price=1000.0) is False
+        assert rm.validate_entry_proximity(entry_price=989.0, current_price=1000.0) is False
 
-        # entry=999, current=1000 → deviation = 0.1% < 0.3% → True
-        assert rm.validate_entry_proximity(entry_price=999.0, current_price=1000.0) is True
+        # entry=995, current=1000 → deviation = 0.5% < 1.0% → True
+        assert rm.validate_entry_proximity(entry_price=995.0, current_price=1000.0) is True
 
 
 # ---------------------------------------------------------------------------

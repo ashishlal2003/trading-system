@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Indian Stock Market Auto-Trader
-NSE/BSE Intraday + Swing | Groww API | GPT-4o | Telegram Approval
+NSE/BSE Intraday + Swing | Groww API | ORB Strategy | Telegram Approval
 
 Entry point — wires all components and starts the async trading system.
 
@@ -52,7 +52,11 @@ from src.news.summarizer import NewsSummarizer
 # ---------------------------------------------------------------------------
 # Signal & risk layer
 # ---------------------------------------------------------------------------
-from src.signals.llm_engine import LLMSignalEngine
+from src.signals.rule_engine import RuleEngine
+from src.strategy.orb import ORBStrategy
+from src.strategy.vwap_reversion import VWAPReversionStrategy
+from src.backtest.engine import BacktestEngine
+from src.backtest.report import BacktestReporter
 from src.risk.manager import RiskManager
 from src.risk.stop_loss import StopLossEnforcer
 
@@ -133,7 +137,7 @@ async def main() -> None:
         "main.startup",
         mode=mode_label,
         capital=settings.TOTAL_CAPITAL,
-        model=settings.OPENAI_MODEL,
+        strategy="ORB-15m + VWAP-Reversion (ADX-switched)",
         log_level=settings.LOG_LEVEL,
     )
     logger.info(
@@ -204,11 +208,32 @@ async def main() -> None:
         logger.info("main.news_layer_ready")
 
         # --- Signal & risk layer --------------------------------------------
-        llm_engine = LLMSignalEngine(
-            api_key=settings.OPENAI_API_KEY,
-            model=settings.OPENAI_MODEL,
-            max_tokens=settings.OPENAI_MAX_TOKENS,
+        rule_engine = RuleEngine(
+            strategy=ORBStrategy(
+                or_minutes=15,
+                rvol_threshold=1.0,
+                target_r=2.0,
+                cutoff_hour=10,
+                cutoff_minute=30,
+            ),
+            vwap_strategy=VWAPReversionStrategy(
+                touch_band_pct=0.15,
+                rsi_long_threshold=45.0,
+                rsi_short_threshold=55.0,
+                atr_sl_mult=1.0,
+                target_r=1.5,
+                min_rvol=1.0,
+            ),
+            trade_type="INTRADAY",
+            adx_trend_threshold=25.0,
         )
+        backtest_engine = BacktestEngine(
+            transaction_cost_pct=0.0006,
+            slippage_pct=0.0002,
+        )
+        backtest_reporter = BacktestReporter()
+        logger.info("main.rule_engine_ready", strategy=rule_engine.strategy.name)
+
         risk_manager = RiskManager(
             total_capital=settings.TOTAL_CAPITAL,
             max_risk_per_trade_pct=settings.MAX_RISK_PER_TRADE_PCT,
@@ -466,7 +491,7 @@ async def main() -> None:
         # -----------------------------------------------------------------------
         scheduler = TradingScheduler(
             data_pipeline=data_pipeline,
-            llm_engine=llm_engine,
+            rule_engine=rule_engine,
             risk_manager=risk_manager,
             telegram_bot=telegram_bot,
             order_manager=order_manager,
@@ -480,6 +505,8 @@ async def main() -> None:
             settings=settings,
             context_builder=context_builder,
             groww_client=groww,
+            backtest_engine=backtest_engine,
+            backtest_reporter=backtest_reporter,
         )
 
         # -----------------------------------------------------------------------

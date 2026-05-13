@@ -37,7 +37,11 @@ def _fetch_candles_sync(yf_sym: str, interval: str, start: str, end: str) -> pd.
                              "Close": "close", "Volume": "volume"})
     df.index.name = "timestamp"
     df = df.reset_index()[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = (
+        pd.to_datetime(df["timestamp"])
+        .dt.tz_convert("Asia/Kolkata")
+        .dt.tz_localize(None)
+    )
     df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
     df["volume"] = df["volume"].astype(int)
     return df.sort_values("timestamp").reset_index(drop=True)

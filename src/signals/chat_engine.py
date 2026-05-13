@@ -15,6 +15,7 @@ RULES:
 - If they ask about a specific stock not in their watchlist, say you don't have data on it.
 - Keep it friendly. A little humour is fine.
 - You have access to the last few messages of conversation — use that for follow-up questions.
+- IMPORTANT: No markdown formatting. No **bold**, no *italics*, no bullet points. Plain text only.
 """
 
 HISTORY_LIMIT = 10  # sliding window: 5 user + 5 assistant turns
@@ -55,8 +56,7 @@ class ChatEngine:
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=300,
-                temperature=0.7,
+                max_completion_tokens=300,
                 messages=messages,
             )
             assistant_reply = response.choices[0].message.content.strip()

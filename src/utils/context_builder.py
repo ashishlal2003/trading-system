@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
+import asyncio
 import pytz
+import yfinance as yf
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,9 +30,27 @@ class ContextBuilder:
         self._price_cache: dict[str, float] = {}
         self._price_cache_at: datetime | None = None
 
+    @staticmethod
+    def _yfinance_price(symbol: str) -> float | None:
+        """Fetch last close from yfinance as offline fallback. Runs in thread pool."""
+        try:
+            ticker = yf.Ticker(f"{symbol}.NS")
+            hist = ticker.history(period="2d", interval="1d")
+            if not hist.empty:
+                return float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+        return None
+
     async def _get_live_prices(self) -> dict[str, float]:
-        """Return watchlist prices, fetching from Groww only if cache is stale."""
-        if not self._market_data or not self._watchlist_symbols:
+        """
+        Return prices for watchlist symbols.
+
+        Primary: Groww live LTP (works during market hours).
+        Fallback: yfinance last close (when Groww returns zeros outside hours).
+        Results are cached for _PRICE_CACHE_TTL_SECONDS.
+        """
+        if not self._watchlist_symbols:
             return {}
 
         now = datetime.now(timezone.utc)
@@ -43,30 +63,55 @@ class ContextBuilder:
             logger.debug("context_builder.price_cache_hit", age_s=round(cache_age, 1))
             return self._price_cache
 
-        try:
-            quotes = await self._market_data.get_multiple_quotes(
-                self._watchlist_symbols, exchange="NSE"
-            )
-            self._price_cache = {
-                sym: float(q["ltp"]) for sym, q in quotes.items()
-                if q.get("ltp") and float(q["ltp"]) > 0
-            }
-            self._price_cache_at = now
-            logger.debug("context_builder.price_cache_refreshed",
-                         count=len(self._price_cache))
-        except Exception as e:
-            logger.warning("context_builder.price_fetch_failed", error=str(e))
+        live: dict[str, float] = {}
 
+        # --- Primary: Groww ---
+        if self._market_data:
+            try:
+                quotes = await self._market_data.get_multiple_quotes(
+                    self._watchlist_symbols, exchange="NSE"
+                )
+                live = {
+                    sym: float(q["ltp"]) for sym, q in quotes.items()
+                    if q.get("ltp") and float(q["ltp"]) > 0
+                }
+                logger.debug("context_builder.groww_prices", count=len(live))
+            except Exception as e:
+                logger.warning("context_builder.groww_price_fetch_failed", error=str(e))
+
+        # --- Fallback: yfinance for any symbol that Groww didn't fill ---
+        missing = [s for s in self._watchlist_symbols if s not in live]
+        if missing:
+            loop = asyncio.get_event_loop()
+            tasks = [
+                loop.run_in_executor(None, self._yfinance_price, sym)
+                for sym in missing
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for sym, price in zip(missing, results):
+                if isinstance(price, float) and price > 0:
+                    live[sym] = price
+            logger.debug("context_builder.yfinance_fallback",
+                         requested=len(missing),
+                         filled=sum(1 for s in missing if s in live))
+
+        self._price_cache = live
+        self._price_cache_at = now
         return self._price_cache
 
     async def build(self) -> str:
         now = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
         sections = [f"CURRENT TIME: {now}", "PAPER TRADE MODE: Yes (no real money at risk)"]
 
-        # Live watchlist prices
+        # Prices — live during market hours, last close otherwise
         prices = await self._get_live_prices()
+        ist_now = datetime.now(IST)
+        market_open = ist_now.hour == 9 and ist_now.minute >= 15 or ist_now.hour > 9
+        market_open = market_open and (ist_now.hour < 15 or (ist_now.hour == 15 and ist_now.minute <= 30))
+        market_open = market_open and ist_now.weekday() < 5
+        price_label = "live" if market_open else "last close"
         if prices:
-            lines = ["WATCHLIST PRICES (live):"]
+            lines = [f"WATCHLIST PRICES ({price_label}):"]
             for sym, ltp in sorted(prices.items()):
                 lines.append(f"  {sym}: ₹{ltp:,.2f}")
             sections.append("\n".join(lines))
@@ -84,7 +129,8 @@ class ContextBuilder:
                     if ltp:
                         direction = p["direction"].upper()
                         unrealised = (ltp - entry) * qty if direction == "BUY" else (entry - ltp) * qty
-                        pnl_str = f" | unrealised ₹{unrealised:+.0f}"
+                        tag = "live" if market_open else "est"
+                        pnl_str = f" | unrealised ₹{unrealised:+.0f} ({tag})"
                     else:
                         pnl_str = ""
                     lines.append(

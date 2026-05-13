@@ -30,6 +30,7 @@ class RiskManager:
         trade_store,  # TradeStore instance
         intraday_leverage: float = 5.0,
     ):
+        self._initial_capital = total_capital
         self.total_capital = total_capital
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.max_daily_loss_pct = max_daily_loss_pct
@@ -111,6 +112,37 @@ class RiskManager:
         )
 
     # ------------------------------------------------------------------
+    # Capital sync
+    # ------------------------------------------------------------------
+
+    async def sync_capital(self) -> tuple[float, float]:
+        """
+        Update total_capital to reflect today's closed-trade P&L.
+
+        After a losing morning, positions are sized smaller.
+        After a profitable morning, they are sized larger — up to the
+        initial capital ceiling so we never lever up beyond starting equity.
+
+        Returns (effective_capital, daily_pnl) so callers can reuse the
+        daily_pnl without a second DB query.
+        """
+        daily_pnl = await self.trade_store.get_daily_pnl()
+        effective = self._initial_capital + daily_pnl
+        # Never size above initial capital (don't compound intraday wins into
+        # oversized positions) and never below a floor of 10% of initial.
+        effective = max(self._initial_capital * 0.10, min(effective, self._initial_capital))
+        if effective != self.total_capital:
+            logger.info(
+                "risk_manager.capital_synced",
+                initial=self._initial_capital,
+                daily_pnl=round(daily_pnl, 2),
+                effective=round(effective, 2),
+            )
+            self.total_capital = effective
+            self.max_daily_loss_limit = -(effective * (self.max_daily_loss_pct / 100))
+        return effective, daily_pnl
+
+    # ------------------------------------------------------------------
     # Gate checks
     # ------------------------------------------------------------------
 
@@ -127,8 +159,10 @@ class RiskManager:
             If the number of currently open positions equals or exceeds
             max_open_positions, reject new entries.
         """
+        # Sync capital to today's P&L; reuse the fetched pnl for Check 1
+        _, daily_pnl = await self.sync_capital()
+
         # --- Check 1: daily loss ---
-        daily_pnl = await self.trade_store.get_daily_pnl()
         if daily_pnl <= self.max_daily_loss_limit:
             reason = (
                 f"Daily loss limit reached: pnl={daily_pnl:.2f}, "
@@ -203,7 +237,7 @@ class RiskManager:
         self,
         entry_price: float,
         current_price: float,
-        max_pct: float = 0.3,
+        max_pct: float = 1.0,
     ) -> bool:
         """
         Return True when the current market price is within *max_pct* percent
@@ -266,6 +300,15 @@ class RiskManager:
             logger.info("pre_trade_check_failed", step="can_trade", reason=reason)
             return False, reason
 
+        # 1b. Reject if there is already an open position in this symbol
+        signal_symbol = signal.get("symbol", "")
+        if signal_symbol:
+            open_symbols = await self.trade_store.get_open_position_symbols()
+            if signal_symbol in open_symbols:
+                reason = f"Already have an open position in {signal_symbol}"
+                logger.info("pre_trade_check_failed", step="symbol_dedup", reason=reason)
+                return False, reason
+
         entry_price = signal["entry_price"]
         stop_loss = signal["stop_loss"]
         target = signal["target_1"]
@@ -292,7 +335,7 @@ class RiskManager:
                 reason = (
                     f"Entry price too far from current market: "
                     f"entry={entry_price}, current={current_price}, "
-                    f"deviation={deviation_pct:.4f}% > 0.3%"
+                    f"deviation={deviation_pct:.4f}% > 1.0%"
                 )
                 logger.info(
                     "pre_trade_check_failed",
