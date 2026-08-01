@@ -1,3 +1,4 @@
+import os
 import httpx
 import pyotp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -6,6 +7,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _AUTH_URL = "https://api.groww.in/v1/token/api/access"
+_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 
 
 class GrowwAPIError(Exception):
@@ -42,10 +44,36 @@ class GrowwClient:
         if self._client:
             await self._client.aclose()
 
+    def _read_api_key_from_env(self) -> str | None:
+        """Re-read GROWW_API_KEY from .env file on disk (not os.environ cache)."""
+        try:
+            env_path = os.path.normpath(_ENV_PATH)
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("GROWW_API_KEY="):
+                        return line.split("=", 1)[1].strip()
+        except Exception as exc:
+            logger.warning("groww_client.env_reread_failed", error=str(exc))
+        return None
+
     async def refresh_access_token(self) -> str:
-        """Exchange the TOTP intermediate JWT for a live access token."""
+        """
+        Exchange the TOTP intermediate JWT for a live access token.
+
+        Re-reads GROWW_API_KEY from .env before attempting the exchange so
+        that updating the key while the server is running takes effect
+        immediately — no restart required.
+        """
         if not self.totp_secret:
             raise RuntimeError("GROWW_TOTP_SECRET not set in .env")
+
+        # Always use the freshest key from disk — user may have updated .env
+        # after the server started without restarting it.
+        fresh_key = self._read_api_key_from_env()
+        if fresh_key and fresh_key != self.api_key:
+            logger.info("groww_client.api_key_reloaded_from_env")
+            self.api_key = fresh_key
 
         code = pyotp.TOTP(self.totp_secret).now()
         logger.info("groww_token_refresh.attempt", totp_code=code)

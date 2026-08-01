@@ -167,6 +167,12 @@ class TradingScheduler:
         # bot trades normally if the regime check fails to fetch data.
         self._market_regime_ok: bool = True
 
+        # Groww auth circuit breaker — set False when auth check fails,
+        # restored to True on next successful auth check.
+        # Trading is blocked while this is False so we never enter positions
+        # blind without live prices or working SL monitoring.
+        self._groww_auth_ok: bool = True
+
         self.scheduler = AsyncIOScheduler(timezone=IST)
         self._register_jobs()
 
@@ -324,25 +330,26 @@ class TradingScheduler:
         ist_time = datetime.now(IST).strftime("%I:%M %p")
         logger.info("scheduler.check_groww_auth.start", time=ist_time)
         try:
-            # Step 1 — refresh token (same as check_groww_apis.py test_token)
             await self.groww_client.refresh_access_token()
             logger.info("scheduler.check_groww_auth.token_ok", time=ist_time)
 
-            # Step 2 — confirm a live quote comes back
             quote = await self.data_pipeline._market_data.get_live_quote("SBIN", exchange="NSE")
             ltp = quote.get("last_price") or (quote.get("ohlc") or {}).get("close") or 0.0
             logger.info("scheduler.check_groww_auth.quote_ok", ltp=ltp, time=ist_time)
 
+            self._groww_auth_ok = True
             await self.telegram_bot.send_message(
                 f"✅ *Groww auth OK* at {ist_time} IST — token live, SBIN LTP ₹{float(ltp):,.2f}"
             )
         except Exception as exc:
+            self._groww_auth_ok = False
             logger.error("scheduler.check_groww_auth.failed", error=str(exc), exc_info=True)
             await self.telegram_bot.send_message(
-                f"🚨 *Groww auth FAILED* at {ist_time} IST\n\n"
+                f"🚨 *Groww auth FAILED* at {ist_time} IST — trading BLOCKED\n\n"
                 f"`{type(exc).__name__}: {str(exc)[:200]}`\n\n"
-                f"Paste a fresh API key from groww.in/trade-api into "
-                f"`GROWW_API_KEY` in `.env` and restart before 9:15 IST."
+                f"1. Go to groww.in/trade-api and copy your API key\n"
+                f"2. Update `GROWW_API_KEY` in `.env`\n"
+                f"3. No restart needed — next auth check will pick it up automatically"
             )
 
     async def pre_market_scan(self) -> None:
@@ -470,6 +477,21 @@ class TradingScheduler:
         """
         if self._is_market_holiday() or not self._is_market_hours():
             return
+
+        if not self._groww_auth_ok:
+            # Auth was down at last check — try to self-heal silently.
+            # This handles the case where the user approves on the Groww
+            # dashboard after the 08:00/09:00 scheduled check already failed.
+            try:
+                await self.groww_client.refresh_access_token()
+                self._groww_auth_ok = True
+                logger.info("scheduler.intraday_scan.auth_recovered")
+                await self.telegram_bot.send_message(
+                    "✅ *Groww auth recovered* — trading resumed"
+                )
+            except Exception:
+                logger.warning("scheduler.intraday_scan.auth_still_down")
+                return
 
         logger.info("scheduler.intraday_scan.start")
 
@@ -726,13 +748,14 @@ class TradingScheduler:
 
                 try:
                     await self.telegram_bot.send_message(
-                        f"{emoji} SQUARED OFF — {symbol}\n"
+                        f"{emoji} SQUARED OFF - {symbol}\n"
                         f"Direction : {direction}\n"
                         f"Qty       : {qty}\n"
                         f"Entry     : Rs {entry:.2f}\n"
                         f"Exit      : Rs {exit_price:.2f}\n"
                         f"Gross P&L : {sign}Rs {pnl:.2f}\n"
-                        f"Reason    : EOD_SQUAREOFF"
+                        f"Reason    : EOD_SQUAREOFF",
+                        parse_mode=None,
                     )
                 except Exception:
                     pass
